@@ -238,6 +238,61 @@
         </div>
       </div>
 
+      <h3>Pass B scoring, in detail</h3>
+      <p class="sub">Pass B runs only when Pass A finds no exact key. It never brute-forces every pair —
+      it compares within a block, gates each candidate behind the name rule and hard-no safeguards,
+      then sums weighted signals into a single 0–1 score.</p>
+
+      <h4 style="margin:18px 0 6px;font-size:.95rem">Step 1 — Blocking</h4>
+      <p class="sub" style="margin-bottom:12px">Candidates are limited to identities that share the record's
+      <code>block_key</code> = <code>soundex(last_name) + birth-year</code> (aliases included). Comparing only
+      within a block keeps it fast; an unusually large block is flagged for a steward rather than silently
+      truncated (cap {{ $passb['block_size_cap'] ?? 2000 }}).</p>
+
+      <h4 style="margin:14px 0 6px;font-size:.95rem">Step 2 — Gates (a candidate must pass both)</h4>
+      <ul class="k-list" style="grid-template-columns:1fr">
+        <li><span class="kn">Name prerequisite</span> — first + last must be equal; middle compatible (null, or initial-vs-full first letter, or exact); suffix equal if both present; DOB compatible. Fail ⇒ candidate skipped.</li>
+        <li><span class="kn">Hard-no</span> — a conflicting DOB (different birth year) <em>or</em> two different valid NPIs discards the candidate outright, no matter how similar everything else is.</li>
+      </ul>
+
+      <h4 style="margin:16px 0 6px;font-size:.95rem">Step 3 — Weighted score</h4>
+      <p class="sub" style="margin-bottom:10px">Each matching signal adds its weight; the total is capped at 1.0.
+      Weights are the fallback defaults — in production they're calibrated per source-pair from labeled data.</p>
+      <table>
+        <tr><th>Signal</th><th>Weight</th><th>Fires when</th></tr>
+        <tr><td>Name similarity</td><td class="num">{{ $passb['weights']['name'] ?? '—' }}</td><td>Jaro-Winkler over <code>"last first"</code> (×similarity, so a perfect name = full weight).</td></tr>
+        <tr><td>Date of birth</td><td class="num">{{ $passb['weights']['dob'] ?? '—' }}</td><td>Full weight on exact date; half on same year only.</td></tr>
+        <tr><td>Address</td><td class="num">{{ $passb['weights']['address'] ?? '—' }}</td><td>Any staged address line1 + zip matches any of the identity's addresses (mailing / practice / alt).</td></tr>
+        <tr><td>Zip</td><td class="num">{{ $passb['weights']['zip'] ?? '—' }}</td><td>Shared zip (even if the street differs).</td></tr>
+        <tr><td>Exclusion share</td><td class="num">{{ $passb['weights']['exclusion_share'] ?? '—' }}</td><td>The identity already carries an exclusion registry (compliance signal).</td></tr>
+        <tr><td>Provider type</td><td class="num">{{ $passb['weights']['provider_type'] ?? '—' }}</td><td><span class="badge soon">reserved</span> — awaits provider-type / NPPES data; not yet scored.</td></tr>
+      </table>
+
+      <h4 style="margin:16px 0 6px;font-size:.95rem">Step 4 — Bands</h4>
+      <div class="frow" style="flex-wrap:wrap;gap:8px">
+        <div class="fnode mini ok"><span class="t">≥ {{ $passb['auto_merge_at'] ?? '0.92' }} → auto-match</span><span class="d">merge, no human</span></div>
+        <div class="fnode mini rev"><span class="t">{{ $passb['review_band_floor'] ?? '0.75' }}–{{ $passb['auto_merge_at'] ?? '0.92' }} → review</span><span class="d">bind + flag steward</span></div>
+        <div class="fnode mini new"><span class="t">&lt; {{ $passb['review_band_floor'] ?? '0.75' }} → new identity</span><span class="d">no match</span></div>
+      </div>
+
+      <h4 style="margin:18px 0 6px;font-size:.95rem">Worked example</h4>
+      <div class="flowd">
+        <p class="cap">Same name + exact DOB + shared exclusion registry, no address on file</p>
+        <div class="frow" style="flex-wrap:wrap;gap:6px">
+          <div class="fnode mini"><span class="t">name 1.0 × {{ $passb['weights']['name'] ?? 0.45 }}</span><span class="d">= {{ $passb['weights']['name'] ?? 0.45 }}</span></div>
+          <span class="farrow">+</span>
+          <div class="fnode mini"><span class="t">dob exact</span><span class="d">= {{ $passb['weights']['dob'] ?? 0.20 }}</span></div>
+          <span class="farrow">+</span>
+          <div class="fnode mini"><span class="t">exclusion share</span><span class="d">= {{ $passb['weights']['exclusion_share'] ?? 0.07 }}</span></div>
+          <span class="farrow">=</span>
+          <div class="fnode mini new"><span class="t">{{ number_format(($passb['weights']['name'] ?? 0.45) + ($passb['weights']['dob'] ?? 0.20) + ($passb['weights']['exclusion_share'] ?? 0.07), 2) }}</span><span class="d">&lt; {{ $passb['review_band_floor'] ?? 0.75 }} → new identity</span></div>
+        </div>
+      </div>
+      <p class="sub">This is deliberately conservative — precision over recall for compliance. On the current
+      single-source data, Pass A already resolves every non-distinct record, so Pass B mostly defers to a new
+      identity until richer signals (NPPES addresses, provider type) and calibrated per-pair weights raise
+      borderline cases into the merge band.</p>
+
       <h3>4 · Incremental sync</h3>
       <div class="flowd">
         <p class="cap">gp:sync — only what changed since the watermark</p>

@@ -57,6 +57,7 @@ Route::get('/features', function () use ($baseUrl) {
     return view('features', [
         'baseUrl' => $baseUrl(),
         'stats' => $stats,
+        'passb' => config('golden_profile.probabilistic'),
         'generatedAt' => now()->toDayDateTimeString(),
     ]);
 })->name('features');
