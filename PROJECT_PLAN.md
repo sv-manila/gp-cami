@@ -132,6 +132,22 @@ these engineering principles are sound and are folded in here:
 
 Not adopted: AWS lakehouse/Iceberg/Spark, AWS Entity Resolution vs Splink spike, ML matcher, external gov-feed ingestion (LEIE/SAM/state boards/scrapers), bitemporal lakehouse, 30-week/5-person timeline — all out of scope for the Laravel hub serving CAMI.
 
+## 8b. As-built local status (2026-07-20)
+
+Running against local MySQL (`app2.streamlineverify.local`), hub DB `golden_profile`:
+
+- **Phase 0** ✓ scaffold, connections, Sanctum, config, `golden_profile` created (local uses `root`; `CACHE_STORE=file`, engine runs inline so no Redis needed yet).
+- **Phase 1** ✓ 17 `gp_*`/`stg_*` tables migrated.
+- **Phase 2** ✓ deterministic Pass A (ssn_hash/npi/dea/upin/license+state/name+dob) — backfill 104 employees → 32 identities.
+- **Phase 7** ✓ `gp_identity_profile` materialized (1 PK read).
+- **Phase 9** ✓ both endpoints live under `auth:sanctum` (200/404/422/401 verified); SSN hasher reproduces `sha512(ssn+key)`; `ssn_hash` never returned.
+- **Rollups** ✓ credentials (0 locally) + exclusions (259) with `link_state`.
+- **Client integration** ✓ `config/services.php` + `.env` + `GoldenProfileClient` + `golden-profile:lookup` command in `C:\ai codes\client`; contract verified from the client's own HTTP stack.
+
+**Deferred:** Pass B probabilistic + review queue (Phase 3), incremental scale/backfill hardening (Phase 4–5), second-source proof (Phase 6), resolution-reuse ingest from `match_actions`/`credential_match_actions` (Phase 8), Redis queue for engine jobs, `streamlineverify/sv` (MatchSummaryStatus). See `docs/RUNNING.md`.
+
+**Not yet run:** the client's `golden-profile:lookup` command inside the Vagrant VM (client boots Redis-backed settings; host has no Redis). Contract proven via the client's vendored HTTP stack against the host loopback; gp-cami binds `0.0.0.0:8137` so the VM reaches it at `192.168.56.1:8137`.
+
 ## 9. Resolved decisions (2026-07-20)
 
 | Item | Decision |

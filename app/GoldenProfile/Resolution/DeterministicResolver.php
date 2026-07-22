@@ -12,7 +12,12 @@ use Illuminate\Support\Str;
  */
 class DeterministicResolver
 {
-    public function __construct(private int $systemId) {}
+    private ProbabilisticResolver $probabilistic;
+
+    public function __construct(private int $systemId)
+    {
+        $this->probabilistic = new ProbabilisticResolver($systemId);
+    }
 
     private function hub()
     {
@@ -35,20 +40,38 @@ class DeterministicResolver
 
         if ($existing) {
             $identityId = (int) $existing->identity_id;
-            $this->enrich($identityId, $p, $licenses, (int) $existing->link_id);
+            // A pinned link is a locked human decision — never re-matched or re-enriched.
+            if (! $existing->is_pinned) {
+                $this->enrich($identityId, $p, $licenses, (int) $existing->link_id);
+            }
 
             return $identityId;
         }
 
         [$identityId, $key, $conf] = $this->matchDeterministic($p, $licenses);
+        $method = 'deterministic';
+        $matchState = 'auto_match';
 
         if ($identityId === null) {
-            $identityId = $this->createIdentity($p);
-            $key = 'new';
-            $conf = 1.0;
-            $method = 'deterministic';
+            // Pass A missed — try Pass B probabilistic.
+            [$pid, $score, $state] = $this->probabilistic->match($p, $licenses);
+            if ($pid !== null && in_array($state, ['auto_match', 'review'], true)) {
+                $identityId = $pid;
+                $key = 'probabilistic';
+                $conf = $score;
+                $method = 'probabilistic';
+                $matchState = $state;
+                if ($state === 'review') {
+                    $this->logReview($identityId, $p, $score);
+                } else {
+                    $this->backfillKeys($identityId, $p);
+                }
+            } else {
+                $identityId = $this->createIdentity($p);
+                $key = 'new';
+                $conf = 1.0;
+            }
         } else {
-            $method = 'deterministic';
             $this->backfillKeys($identityId, $p);
         }
 
@@ -62,6 +85,8 @@ class DeterministicResolver
             'match_method' => $method,
             'match_key' => $key,
             'match_score' => $conf,
+            'match_state' => $matchState,
+            'is_pinned' => 0,
             'linked_at' => now(),
         ]);
 
@@ -135,6 +160,20 @@ class DeterministicResolver
         }
 
         return [null, null, null];
+    }
+
+    /** Mid-confidence probabilistic bind — flag for steward review (reversible). */
+    private function logReview(int $identityId, object $p, float $score): void
+    {
+        $this->hub()->table('gp_resolution_log')->insert([
+            'action' => 'relink',
+            'identity_id' => $identityId,
+            'affected_ids' => json_encode(['source_id' => (int) $p->source_id, 'stg_person_id' => (int) $p->stg_person_id]),
+            'match_key' => 'probabilistic',
+            'reason' => 'review-band probabilistic match score='.round($score, 4).' — steward confirm/split',
+            'actor' => 'engine',
+            'created_at' => now(),
+        ]);
     }
 
     private function createIdentity(object $p): int

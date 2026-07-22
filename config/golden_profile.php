@@ -35,17 +35,46 @@ return [
     /*
     | Pass B — probabilistic. No single global cutoff in production: thresholds
     | are set per source-pair from labeled data (Phase 3). These are the
-    | fallback bands used until a pair is calibrated.
+    | fallback bands used until a pair is calibrated. Bands per GPP spec:
+    | >=0.92 auto_match, 0.75-0.92 review, <0.75 no_match (new identity).
     */
     'probabilistic' => [
-        // A pair without enough labels to calibrate defaults to recall-first
-        // + steward review, never a guessed auto-merge.
         'default_mode'        => 'recall_first_review',
-        'auto_merge_at'       => 0.92,   // >= : auto-merge
-        'review_band_floor'   => 0.75,   // [floor, auto_merge_at) : review queue
-        // < review_band_floor : treated as a new identity
-        'block_size_cap'      => 2000,   // oversized blocks are split + logged, never truncated
-        'calibrated_pairs'    => [],     // filled in Phase 3: ['systemA:systemB' => ['auto'=>..,'review'=>..]]
+        'auto_merge_at'       => 0.92,
+        'review_band_floor'   => 0.75,
+        'block_size_cap'      => 2000,   // oversized blocks flagged for steward, never truncated
+        'calibrated_pairs'    => [],
+        // weighted signal contributions (sum of fired weights, capped at 1.0)
+        'weights' => [
+            'name'            => 0.45,   // Jaro-Winkler over all aliases
+            'dob'             => 0.20,
+            'address'         => 0.15,   // any-vs-any across mailing/practice/alt
+            'provider_type'   => 0.08,
+            'exclusion_share' => 0.07,   // shared exclusion registry/flags
+            'zip'             => 0.05,
+        ],
+        // Hard-no rules: block a merge outright regardless of score (GPP "Get it wrong" safeguards).
+        'hard_no' => [
+            'conflicting_dob'  => true,  // both non-null and different
+            'two_valid_npis'   => true,  // both non-null and different
+        ],
+    ],
+
+    /*
+    | Survivorship — per-field winner order by source system_code, then recency.
+    | "verified" beats all; compliance facts trust the issuer; status conflicts
+    | take the most-restrictive value. Unlisted systems fall back to reliability_rank.
+    */
+    'survivorship' => [
+        'internal_verified_decay_days' => 365,
+        'field_authority' => [
+            'identity'  => ['verified', 'nppes', 'streamline_local', 'state_license', 'scraped_license'],
+            'license'   => ['state_license', 'nppes', 'scraped_license', 'streamline_local'],
+            'address'   => ['nppes', 'state_license', 'streamline_local', 'scraped_license'],
+            'exclusion' => ['leie', 'sam', 'state_exclusion', 'streamline_local'],
+        ],
+        // status conflict resolution: most-restrictive wins (GPP conflict-resolution research)
+        'status_severity' => ['revoked' => 5, 'suspended' => 4, 'excluded' => 5, 'lapsed' => 3, 'expired' => 2, 'active' => 1],
     ],
 
     /*
@@ -57,14 +86,6 @@ return [
         'identity'   => 'precision_first',
         'compliance' => 'recall_first',
         'exclusion_link_default_state' => 'candidate', // candidate|confirmed|rejected
-    ],
-
-    /*
-    | Survivorship — authority beats recency across trust tiers.
-    | Recency only tiebreaks within the same reliability_rank tier.
-    */
-    'survivorship' => [
-        'internal_verified_decay_days' => 365, // human-checked value decays past this window
     ],
 
     /*

@@ -5,6 +5,7 @@ namespace App\GoldenProfile;
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Materialize\ProfileMaterializer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
+use App\GoldenProfile\Resolution\Survivorship;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -26,12 +27,24 @@ class Engine
 
     private ProfileMaterializer $materializer;
 
+    private Survivorship $survivorship;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
         $this->connector = new StreamlineLocalConnector($this->systemId);
         $this->resolver = new DeterministicResolver($this->systemId);
         $this->materializer = new ProfileMaterializer;
+        $this->survivorship = new Survivorship;
+    }
+
+    /** Per affected identity: recompute survivorship winners, then rebuild the profile. */
+    private function finalize(array $identityIds): void
+    {
+        foreach (array_keys($identityIds) as $identityId) {
+            $this->survivorship->recompute((int) $identityId);
+            $this->materializer->rebuild((int) $identityId);
+        }
     }
 
     private function hub()
@@ -78,9 +91,7 @@ class Engine
             }
             $this->rollupCredentials($empIds);
             $this->rollupExclusions($empIds);
-            foreach (array_keys($identityIds) as $identityId) {
-                $this->materializer->rebuild($identityId);
-            }
+            $this->finalize($identityIds);
             if ($progress) {
                 $progress($count);
             }
@@ -117,9 +128,7 @@ class Engine
             }
             $this->rollupCredentials($empIds);
             $this->rollupExclusions($empIds);
-            foreach (array_keys($identityIds) as $identityId) {
-                $this->materializer->rebuild($identityId);
-            }
+            $this->finalize($identityIds);
             if ($progress) {
                 $progress($count);
             }

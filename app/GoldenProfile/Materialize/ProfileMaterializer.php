@@ -76,6 +76,13 @@ class ProfileMaterializer
             ])->values();
         $hasActiveExclusion = $exclusions->contains(fn ($e) => $e['link_state'] !== 'rejected') ? 1 : 0;
 
+        $boardActions = $hub->table('gp_board_action')->where('identity_id', $identityId)->get()
+            ->map(fn ($b) => [
+                'registry' => $b->registry, 'action_type' => $b->action_type,
+                'action_date' => (string) $b->action_date, 'resolution_date' => (string) $b->resolution_date,
+            ])->values();
+        $hasActiveBoardAction = $boardActions->contains(fn ($b) => empty($b['resolution_date'])) ? 1 : 0;
+
         $resolutions = $hub->table('gp_identity_resolution')
             ->where('identity_id', $identityId)->where('is_current', 1)->get()
             ->map(fn ($r) => [
@@ -96,6 +103,7 @@ class ProfileMaterializer
                 'first_name' => $identity->canonical_first,
                 'middle_name' => $identity->canonical_middle,
                 'last_name' => $identity->canonical_last,
+                'suffix' => $identity->canonical_suffix ?? null,
                 'date_of_birth' => $identity->canonical_dob,
                 'ssn_hash' => $identity->ssn_hash,
                 'ssn_last_four' => $this->ssnLastFour($stgIds),
@@ -123,6 +131,9 @@ class ProfileMaterializer
                 'exclusion_count' => $exclusions->count(),
                 'has_active_exclusion' => $hasActiveExclusion,
                 'exclusions' => $exclusions->toJson(),
+                'board_action_count' => $boardActions->count(),
+                'has_active_board_action' => $hasActiveBoardAction,
+                'board_actions' => $boardActions->toJson(),
                 'resolution_count' => $resolutions->count(),
                 'resolutions' => $resolutions->toJson(),
                 'first_seen' => $identity->first_seen,
