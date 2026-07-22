@@ -1,3 +1,14 @@
+@php
+    $pretty = function ($j) {
+        if ($j === null || $j === '') return null;
+        $d = json_decode($j);
+        return json_last_error() === JSON_ERROR_NONE
+            ? json_encode($d, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+            : $j;
+    };
+    $credJson = $credJson ?? [];
+    $exclJson = $exclJson ?? [];
+@endphp
 <div class="head">
   <h1>{{ trim(($p->last_name ?? '').', '.($p->first_name ?? '').' '.($p->middle_name ?? '')) }}{{ $p->suffix ? ' '.$p->suffix : '' }}</h1>
   <span class="pill info">#{{ $p->identity_id }}</span>
@@ -46,7 +57,7 @@
 
 <h2>Credential matches <span class="n">{{ $creds->count() }}</span></h2>
 @if($creds->isEmpty())<div class="empty">No credential matches rolled up to this identity.</div>@else
-<table><thead><tr><th>Match ID</th><th>Registry</th><th>Status</th><th>Code</th><th>Valid</th><th>Current</th><th>Link</th><th>Resolved</th></tr></thead><tbody>
+<table><thead><tr><th>Match ID</th><th>Registry</th><th>Status</th><th>Code</th><th>Valid</th><th>Current</th><th>Link</th><th>Resolved</th><th>Match JSON</th></tr></thead><tbody>
   @foreach($creds as $c)<tr>
     <td><code>{{ $c->credential_match_id }}</code></td><td>{{ $c->registry ?: '—' }}</td>
     <td>{{ $c->match_summary_status ?: '—' }}</td><td>{{ $c->match_summary_status_code ?? '—' }}</td>
@@ -54,12 +65,13 @@
     <td>{!! $c->current ? '<span class=yes>yes</span>' : '<span class=no>no</span>' !!}</td>
     <td><span class="pill mut">{{ $c->link_state }}</span></td>
     <td>{{ $c->date_resolved ?: '—' }}</td>
+    <td>@php $mj = $pretty($credJson[$c->credential_match_id] ?? null); @endphp @if($mj)<details><summary>view</summary><pre>{{ $mj }}</pre></details>@else<span class="no">—</span>@endif</td>
   </tr>@endforeach
 </tbody></table>@endif
 
 <h2>Exclusions <span class="n">{{ $excl->count() }}</span></h2>
 @if($excl->isEmpty())<div class="empty">No exclusion hits.</div>@else
-<table><thead><tr><th>Match ID</th><th>Registry</th><th>Match flags</th><th>Link state</th></tr></thead><tbody>
+<table><thead><tr><th>Match ID</th><th>Registry</th><th>Match flags</th><th>Link state</th><th>Match JSON</th></tr></thead><tbody>
   @foreach($excl as $e)
     @php $flags = collect(['SSN'=>$e->is_ssn_match,'NPI'=>$e->is_npi_match,'Name'=>$e->is_canonical_name_match,'UPIN'=>$e->is_upin_match,'License'=>$e->is_license_number_match])->filter()->keys(); @endphp
     <tr>
@@ -67,6 +79,7 @@
       <td>{{ $e->registry ?: '—' }}</td>
       <td>@if($flags->isEmpty())—@else<div class="chips">@foreach($flags as $f)<span class="chip">{{ $f }}</span>@endforeach</div>@endif</td>
       <td><span class="pill {{ $e->link_state === 'rejected' ? 'mut' : 'warn' }}">{{ $e->link_state }}</span></td>
+      <td>@php $mj = $pretty($exclJson[$e->match_id] ?? null); @endphp @if($mj)<details><summary>view</summary><pre>{{ $mj }}</pre></details>@else<span class="no">—</span>@endif</td>
     </tr>
   @endforeach
 </tbody></table>@endif

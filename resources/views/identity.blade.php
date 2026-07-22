@@ -52,6 +52,8 @@
   .chip{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:2px 7px;color:var(--ink-soft)}
   .empty{color:var(--ink-faint);font-size:.88rem;font-style:italic;padding:6px 0}
   .yes{color:var(--ok);font-weight:700} .no{color:var(--ink-faint)}
+  details summary{cursor:pointer;color:var(--orange);font-size:.8rem;font-family:var(--mono)}
+  pre{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:6px 0 0;font-family:var(--mono);font-size:.74rem;line-height:1.45;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;max-width:520px}
   footer{padding:26px 0 46px;color:var(--ink-faint);font-family:var(--mono);font-size:12px}
   @media (max-width:820px){.grid{grid-template-columns:1fr 1fr}}
 </style>

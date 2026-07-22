@@ -81,6 +81,8 @@
   #idModal .empty{color:var(--ink-faint);font-size:.88rem;font-style:italic;padding:4px 0}
   #idModal .yes{color:var(--ok);font-weight:700} #idModal .no{color:var(--ink-faint)}
   #idModal code{background:var(--surface-2);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
+  #idModal details summary{cursor:pointer;color:var(--orange);font-size:.8rem;font-family:var(--mono)}
+  #idModal pre{background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:6px 0 0;font-family:var(--mono);font-size:.74rem;line-height:1.45;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-word;max-width:520px}
   @media (max-width:820px){#idModal .grid{grid-template-columns:1fr 1fr}}
   .empty{background:var(--surface);border:1px dashed var(--line);border-radius:10px;padding:40px;text-align:center;color:var(--ink-faint)}
   .chips{display:flex;flex-wrap:wrap;gap:4px}

@@ -44,6 +44,13 @@ Route::get('/identity/{id}', function (Request $request, $id) {
         'res' => $hub->table('gp_identity_resolution')->where('identity_id', $id)->where('is_current', 1)->get(),
     ];
 
+    // Raw match JSON from the source (read-only): credential_matches.match, matches.metadata.
+    $src = DB::connection('streamline_local');
+    $credIds = $data['creds']->pluck('credential_match_id')->all();
+    $exclIds = $data['excl']->pluck('match_id')->all();
+    $data['credJson'] = $credIds ? $src->table('credential_matches')->whereIn('id', $credIds)->pluck('match', 'id')->all() : [];
+    $data['exclJson'] = $exclIds ? $src->table('matches')->whereIn('id', $exclIds)->pluck('metadata', 'id')->all() : [];
+
     return view($request->boolean('fragment') ? '_identity_detail' : 'identity', $data);
 })->whereNumber('id')->name('identity');
 
