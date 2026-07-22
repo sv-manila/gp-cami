@@ -29,6 +29,8 @@
   .brand b{background:var(--gold-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
   .topnav a{color:#cdd8e4;font-size:.9rem;margin-left:20px;padding-bottom:2px;border-bottom:2px solid transparent}
   .topnav a.active,.topnav a:hover{color:#fff;border-bottom-color:var(--gold)}
+  .topnav a.btn{background:var(--orange);color:#fff;border-radius:6px;padding:7px 14px;font-weight:700;border-bottom:none}
+  .topnav a.btn:hover{background:#ff9648;border-bottom:none}
   /* hero */
   .hero{background:linear-gradient(180deg,var(--navy),var(--navy-deep));color:#fff;padding:44px 0 40px;position:relative;overflow:hidden}
   .hero::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;background:var(--gold-grad)}
@@ -79,7 +81,7 @@
 <body>
   <div class="topbar"><div class="wrap">
     <div class="brand">gp&#8209;<b>cami</b></div>
-    <nav class="topnav"><a href="/features" class="active">Features</a><a href="/docs">API Docs</a></nav>
+    <nav class="topnav"><a href="/features" class="active">Features</a><a href="/docs">API Docs</a><a href="/search" class="btn">Search</a></nav>
   </div></div>
 
   <header class="hero"><div class="wrap">
