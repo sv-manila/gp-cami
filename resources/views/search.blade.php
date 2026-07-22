@@ -52,6 +52,36 @@
   .num{font-variant-numeric:tabular-nums;text-align:right}
   .pill{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
   .pill.crit{color:var(--crit);background:var(--crit-wash)} .pill.ok{color:var(--ok);background:var(--ok-wash)}
+  .pill.warn{color:var(--warn);background:var(--warn-wash)} .pill.info{color:#fff;background:var(--navy)}
+  .pill.mut{color:var(--ink-soft);background:var(--surface-2);border:1px solid var(--line)}
+  /* modal */
+  #idModal{position:fixed;inset:0;background:rgba(0,20,40,.55);display:none;z-index:100;padding:28px}
+  #idModal.open{display:flex}
+  #idModal .panel{background:var(--bg);margin:auto;max-width:940px;width:100%;max-height:90vh;overflow-y:auto;border-radius:12px;box-shadow:0 24px 70px rgba(0,0,0,.45)}
+  #idModal .bar{position:sticky;top:0;background:linear-gradient(90deg,var(--navy),var(--navy-deep));color:#fff;padding:11px 20px;display:flex;justify-content:space-between;align-items:center;border-radius:12px 12px 0 0;z-index:3;border-bottom:3px solid var(--orange)}
+  #idModal .bar b{font-weight:700;font-size:.95rem}
+  #idModal .bar a{color:var(--gold-light);font-family:var(--mono);font-size:11px;margin-right:14px}
+  #idModal .x{cursor:pointer;font-size:1.5rem;line-height:1;color:#cdd8e4;background:none;border:none}
+  #idModal .x:hover{color:#fff}
+  #idModal .body{padding:20px 26px 30px}
+  #idModal .loading{padding:50px;text-align:center;color:var(--ink-faint);font-family:var(--mono)}
+  #idModal .head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 3px}
+  #idModal h1{font-size:1.45rem;font-weight:800;letter-spacing:-.02em;margin:0}
+  #idModal .uuid{font-family:var(--mono);font-size:12px;color:var(--ink-faint)}
+  #idModal .badges{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0 0}
+  #idModal h2{font-size:1.08rem;font-weight:800;color:var(--navy);margin:26px 0 9px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  @media (prefers-color-scheme:dark){#idModal h2{color:#cdd8e4}}
+  #idModal h2 .n{font-family:var(--mono);font-size:.78rem;color:var(--ink-faint);font-weight:400}
+  #idModal .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  #idModal .fld{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+  #idModal .fld .k{font-family:var(--mono);font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint)}
+  #idModal .fld .v{font-weight:600;margin-top:2px;word-break:break-word;font-size:.9rem}
+  #idModal .chips{display:flex;flex-wrap:wrap;gap:5px}
+  #idModal .chip{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:2px 7px;color:var(--ink-soft)}
+  #idModal .empty{color:var(--ink-faint);font-size:.88rem;font-style:italic;padding:4px 0}
+  #idModal .yes{color:var(--ok);font-weight:700} #idModal .no{color:var(--ink-faint)}
+  #idModal code{background:var(--surface-2);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
+  @media (max-width:820px){#idModal .grid{grid-template-columns:1fr 1fr}}
   .empty{background:var(--surface);border:1px dashed var(--line);border-radius:10px;padding:40px;text-align:center;color:var(--ink-faint)}
   .chips{display:flex;flex-wrap:wrap;gap:4px}
   .chip{font-family:var(--mono);font-size:11px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--ink-soft)}
@@ -124,13 +154,44 @@
 
     <footer>gp-cami · Golden Profile · served from <code>gp_identity_profile</code> · <a href="/docs">API Docs →</a></footer>
   </div>
+  <div id="idModal" role="dialog" aria-modal="true">
+    <div class="panel">
+      <div class="bar">
+        <b>Identity detail</b>
+        <span><a id="idModalOpen" href="#" target="_blank" rel="noopener">open full page ↗</a><button class="x" type="button" aria-label="Close">&times;</button></span>
+      </div>
+      <div class="body"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
   <script>
-    document.querySelectorAll('tbody tr[data-href]').forEach(function(tr){
-      tr.addEventListener('click', function(e){
-        if (e.target.closest('a')) return; // let explicit links work
-        window.location = tr.dataset.href;
+    (function(){
+      var modal = document.getElementById('idModal');
+      var body = modal.querySelector('.body');
+      var openLink = document.getElementById('idModalOpen');
+
+      function open(href){
+        openLink.href = href;                 // full-page fallback link
+        body.innerHTML = '<div class="loading">Loading…</div>';
+        modal.classList.add('open');
+        document.body.style.overflow = 'hidden';
+        fetch(href + (href.indexOf('?') < 0 ? '?' : '&') + 'fragment=1', {headers:{'X-Requested-With':'fetch'}})
+          .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.text(); })
+          .then(function(html){ body.innerHTML = html; })
+          .catch(function(e){ body.innerHTML = '<div class="loading">Could not load identity ('+e.message+').</div>'; });
+      }
+      function close(){ modal.classList.remove('open'); document.body.style.overflow=''; }
+
+      document.querySelectorAll('tbody tr[data-href]').forEach(function(tr){
+        tr.addEventListener('click', function(e){
+          if (e.metaKey || e.ctrlKey || e.button === 1) return; // allow new-tab
+          e.preventDefault();
+          open(tr.dataset.href);
+        });
       });
-    });
+      modal.querySelector('.x').addEventListener('click', close);
+      modal.addEventListener('click', function(e){ if (e.target === modal) close(); });
+      document.addEventListener('keydown', function(e){ if (e.key === 'Escape') close(); });
+    })();
   </script>
 </body>
 </html>

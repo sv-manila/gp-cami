@@ -29,20 +29,22 @@ Route::get('/search', function (Request $request) {
 })->name('search');
 
 // Full detail for one golden identity — profile + rollups + source links.
-Route::get('/identity/{id}', function ($id) {
+// ?fragment=1 returns just the inner content (for the search modal).
+Route::get('/identity/{id}', function (Request $request, $id) {
     $p = GpIdentityProfile::find($id);
     abort_if(! $p, 404);
 
     $hub = DB::connection('golden_profile');
-
-    return view('identity', [
+    $data = [
         'p' => $p,
         'links' => $hub->table('gp_source_link')->where('identity_id', $id)->orderByDesc('match_score')->get(),
         'creds' => $hub->table('gp_identity_credential')->where('identity_id', $id)->get(),
         'excl' => $hub->table('gp_identity_exclusion')->where('identity_id', $id)->get(),
         'board' => $hub->table('gp_board_action')->where('identity_id', $id)->orderByDesc('action_date')->get(),
         'res' => $hub->table('gp_identity_resolution')->where('identity_id', $id)->where('is_current', 1)->get(),
-    ]);
+    ];
+
+    return view($request->boolean('fragment') ? '_identity_detail' : 'identity', $data);
 })->whereNumber('id')->name('identity');
 
 $baseUrl = fn () => rtrim(config('app.url'), '/') === 'http://localhost'
