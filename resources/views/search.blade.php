@@ -43,8 +43,11 @@
   table{border-collapse:collapse;width:100%;font-size:.88rem;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   th{background:var(--navy);color:#fff;text-align:left;padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
   td{padding:10px 12px;border-top:1px solid var(--line);color:var(--ink-soft);vertical-align:top}
+  tbody tr{cursor:pointer}
+  tbody tr:hover td{background:var(--warn-wash)}
   tr:nth-child(even) td{background:var(--surface-2)}
   td.name{color:var(--navy);font-weight:700}
+  td.name a{color:inherit} td.name a:hover{color:var(--orange)}
   @media (prefers-color-scheme:dark){td.name{color:#e7ebf0}}
   .num{font-variant-numeric:tabular-nums;text-align:right}
   .pill{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px}
@@ -95,9 +98,9 @@
         </tr></thead>
         <tbody>
         @foreach($results as $r)
-          <tr>
+          <tr data-href="/identity/{{ $r->identity_id }}">
             <td><code>#{{ $r->identity_id }}</code></td>
-            <td class="name">{{ trim(($r->last_name ?? '').', '.($r->first_name ?? '').' '.($r->middle_name ?? '')) }}{{ $r->suffix ? ' '.$r->suffix : '' }}</td>
+            <td class="name"><a href="/identity/{{ $r->identity_id }}">{{ trim(($r->last_name ?? '').', '.($r->first_name ?? '').' '.($r->middle_name ?? '')) }}{{ $r->suffix ? ' '.$r->suffix : '' }}</a></td>
             <td>{{ $r->date_of_birth ? $r->date_of_birth->toDateString() : '—' }}</td>
             <td>{{ $r->ssn_last_four ? '•••-••-'.$r->ssn_last_four : '—' }}</td>
             <td class="num">{{ $r->record_count }}</td>
@@ -120,5 +123,13 @@
 
     <footer>gp-cami · Golden Profile · served from <code>gp_identity_profile</code> · <a href="/docs">API Docs →</a></footer>
   </div>
+  <script>
+    document.querySelectorAll('tbody tr[data-href]').forEach(function(tr){
+      tr.addEventListener('click', function(e){
+        if (e.target.closest('a')) return; // let explicit links work
+        window.location = tr.dataset.href;
+      });
+    });
+  </script>
 </body>
 </html>

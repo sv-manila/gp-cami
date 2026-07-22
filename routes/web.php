@@ -28,6 +28,23 @@ Route::get('/search', function (Request $request) {
     return view('search', ['last' => $last, 'first' => $first, 'results' => $results]);
 })->name('search');
 
+// Full detail for one golden identity — profile + rollups + source links.
+Route::get('/identity/{id}', function ($id) {
+    $p = GpIdentityProfile::find($id);
+    abort_if(! $p, 404);
+
+    $hub = DB::connection('golden_profile');
+
+    return view('identity', [
+        'p' => $p,
+        'links' => $hub->table('gp_source_link')->where('identity_id', $id)->orderByDesc('match_score')->get(),
+        'creds' => $hub->table('gp_identity_credential')->where('identity_id', $id)->get(),
+        'excl' => $hub->table('gp_identity_exclusion')->where('identity_id', $id)->get(),
+        'board' => $hub->table('gp_board_action')->where('identity_id', $id)->orderByDesc('action_date')->get(),
+        'res' => $hub->table('gp_identity_resolution')->where('identity_id', $id)->where('is_current', 1)->get(),
+    ]);
+})->whereNumber('id')->name('identity');
+
 $baseUrl = fn () => rtrim(config('app.url'), '/') === 'http://localhost'
     ? 'http://127.0.0.1:8137'
     : rtrim(config('app.url'), '/');
