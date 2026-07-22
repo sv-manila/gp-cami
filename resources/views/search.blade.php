@@ -94,7 +94,7 @@
         <thead><tr>
           <th>ID</th><th>Name</th><th>DOB</th><th>SSN</th>
           <th class="num">Recs</th><th class="num">Accts</th><th>Licenses</th>
-          <th>Exclusions</th><th>Board</th>
+          <th>Credentials</th><th>Exclusions</th><th>Board</th>
         </tr></thead>
         <tbody>
         @foreach($results as $r)
@@ -110,6 +110,7 @@
                 <div class="chips">@foreach(array_slice($r->licenses, 0, 4) as $l)<span class="chip">{{ $l['number'] ?? '?' }}{{ !empty($l['state']) ? ' ('.$l['state'].')' : '' }}</span>@endforeach</div>
               @endif
             </td>
+            <td>@if($r->credential_count)<span class="pill ok">{{ $r->credential_count }}</span>@else—@endif</td>
             <td>
               @if($r->has_active_exclusion)<span class="pill crit">{{ $r->exclusion_count }} active</span>
               @elseif($r->exclusion_count)<span class="pill">{{ $r->exclusion_count }}</span>@else—@endif
