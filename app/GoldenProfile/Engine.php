@@ -147,10 +147,18 @@ class Engine
         if (! $employeeIds) {
             return;
         }
+        $excludeCodes = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
         $rows = $this->src()->table('credential_matches')->whereIn('employee_id', $employeeIds)->get();
         foreach ($rows as $c) {
             $identityId = $this->identityForSource((int) $c->employee_id);
             if (! $identityId) {
+                continue;
+            }
+            // Pending / Error matches are not part of the golden data — never roll them up.
+            if (in_array((int) $c->match_summary_status_code, $excludeCodes, true)) {
+                $this->hub()->table('gp_identity_credential')
+                    ->where(['system_id' => $this->systemId, 'credential_match_id' => $c->id])->delete();
+
                 continue;
             }
             $this->hub()->table('gp_identity_credential')->updateOrInsert(
