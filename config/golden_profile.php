@@ -120,8 +120,9 @@ return [
         // explicitly excluded: 0 (*Valid), 10 (Pending), 50/60 (Expired), 100 (Error)
         'excluded_status_codes'   => [0, 10, 50, 60, 100],
         'respect_expiry_date'     => true, // expiry_date IS NULL OR expiry_date >= CURDATE()
-        // never roll these into the hub at all: 10 (Pending), 100 (Error)
-        'rollup_exclude_status_codes' => [10, 100],
+        // never roll these into the hub at all: 10 (Pending), 100 (Error),
+        // 85 (Invalid - Incorrect License # Format)
+        'rollup_exclude_status_codes' => [10, 100, 85],
     ],
 
 ];
