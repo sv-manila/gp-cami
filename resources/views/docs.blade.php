@@ -67,6 +67,8 @@
     <div class="brand">gp&#8209;<b>cami</b></div>
     <div class="tag">Golden Profile API v1</div>
     <nav>
+      <span class="grp">Site</span>
+      <a href="/features">← Features &amp; capabilities</a>
       <span class="grp">Overview</span>
       <a href="#intro">Introduction</a>
       <a href="#base">Base URL</a>

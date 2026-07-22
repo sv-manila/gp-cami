@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gp-cami · Features &amp; Capabilities</title>
+<style>
+  :root{
+    --navy:#00284c; --navy-deep:#001a33; --orange:#f47d27; --gold:#c9a227; --gold-light:#f0d98a;
+    --gold-grad:linear-gradient(135deg,#a67c00,#e9c766 45%,#c9a227 70%,#f3e3a6);
+    --ink:#212121; --ink-soft:#4f4f4f; --ink-faint:#7d858e; --surface:#fff; --surface-2:#f6f7f9;
+    --line:#e1e1e1; --bg:#f2f2f2; --ok:#2f7d54; --ok-wash:#e5f1ea; --crit:#b34534; --crit-wash:#f5e2de;
+    --warn:#b1791f; --warn-wash:#f6ecd6;
+    --sans:"Open Sans","Segoe UI",Helvetica,Arial,sans-serif; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --ink:#e7ebf0; --ink-soft:#aeb7c2; --ink-faint:#7c8794; --surface:#131b26; --surface-2:#0f1620;
+    --line:#23303f; --bg:#0b1017; --navy:#0d2c4a; --ok:#5fbd85; --ok-wash:#16251c; --crit:#de6f5d; --crit-wash:#2c1a16;
+  }}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--orange);text-decoration:none}
+  code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);border:1px solid var(--line);border-radius:3px;padding:1px 5px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+  /* topbar */
+  .topbar{background:linear-gradient(90deg,var(--navy),var(--navy-deep));border-bottom:4px solid var(--orange)}
+  .topbar .wrap{display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
+  .brand{color:#fff;font-weight:800;font-size:1.15rem}
+  .brand b{background:var(--gold-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .topnav a{color:#cdd8e4;font-size:.9rem;margin-left:20px;padding-bottom:2px;border-bottom:2px solid transparent}
+  .topnav a.active,.topnav a:hover{color:#fff;border-bottom-color:var(--gold)}
+  /* hero */
+  .hero{background:linear-gradient(180deg,var(--navy),var(--navy-deep));color:#fff;padding:44px 0 40px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;left:0;right:0;bottom:0;height:4px;background:var(--gold-grad)}
+  .hero h1{font-size:2.3rem;font-weight:800;letter-spacing:-.02em;margin:0}
+  .hero h1 .g{background:var(--gold-grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{color:#cdd8e4;max-width:62ch;margin:12px 0 0;font-size:1.05rem}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+  .flow span{font-family:var(--mono);font-size:12px;color:#cdd8e4;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.16);border-radius:4px;padding:6px 11px}
+  .flow b{color:var(--gold-light)}
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:-28px 0 0;position:relative;z-index:2}
+  .stat{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:8px;padding:14px}
+  .stat .n{font-size:1.7rem;font-weight:800;color:var(--navy);line-height:1}
+  @media (prefers-color-scheme:dark){.stat .n{color:var(--gold-light)}}
+  .stat .l{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);margin-top:6px}
+  section{padding:36px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:1.4rem;font-weight:800;color:var(--navy);margin:0 0 6px}
+  @media (prefers-color-scheme:dark){h2{color:#cdd8e4}}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);font-weight:700;margin:0 0 6px}
+  p.sub{color:var(--ink-soft);max-width:70ch;margin:0 0 18px}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:18px 18px 16px;position:relative}
+  .card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--gold-grad);border-radius:10px 10px 0 0}
+  .card h3{margin:6px 0 6px;font-size:1.02rem;color:var(--navy)}
+  @media (prefers-color-scheme:dark){.card h3{color:#e7ebf0}}
+  .card p{margin:0;font-size:.88rem;color:var(--ink-soft)}
+  .card .ico{font-family:var(--mono);font-size:12px;font-weight:700;color:#4a3a05;background:var(--gold-grad);border-radius:5px;padding:3px 8px;display:inline-block}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px;margin-left:6px;vertical-align:middle}
+  .badge.live{color:var(--ok);background:var(--ok-wash)} .badge.soon{color:var(--warn);background:var(--warn-wash)}
+  .pipe{display:flex;flex-wrap:wrap;gap:0;margin-top:8px;align-items:stretch}
+  .pipe .step{flex:1;min-width:150px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:8px;padding:12px 14px;margin:6px}
+  .pipe .step .k{font-family:var(--mono);font-size:11px;color:var(--orange);font-weight:700}
+  .pipe .step h4{margin:4px 0 4px;font-size:.92rem}
+  .pipe .step p{margin:0;font-size:.82rem;color:var(--ink-soft)}
+  table{border-collapse:collapse;width:100%;font-size:.86rem;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th{background:var(--navy);color:#fff;text-align:left;padding:9px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  td{padding:9px 12px;border-top:1px solid var(--line);color:var(--ink-soft)}
+  tr:nth-child(even) td{background:var(--surface-2)}
+  .k-list{list-style:none;padding:0;margin:8px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .k-list li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:9px 12px;font-size:.86rem}
+  .k-list .kn{font-family:var(--mono);color:var(--navy);font-weight:700}
+  @media (prefers-color-scheme:dark){.k-list .kn{color:var(--gold-light)}}
+  footer{padding:26px 0 46px;color:var(--ink-faint);font-family:var(--mono);font-size:12px}
+  @media (max-width:900px){.cards{grid-template-columns:1fr 1fr}.stats{grid-template-columns:repeat(3,1fr)}.k-list{grid-template-columns:1fr}}
+  @media (max-width:560px){.cards,.stats{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div class="topbar"><div class="wrap">
+    <div class="brand">gp&#8209;<b>cami</b></div>
+    <nav class="topnav"><a href="/features" class="active">Features</a><a href="/docs">API Docs</a></nav>
+  </div></div>
+
+  <header class="hero"><div class="wrap">
+    <h1>Golden <span class="g">Profile</span> — capabilities</h1>
+    <p>A source-agnostic identity hub that resolves scattered person records into one golden identity,
+    enriches it, remembers how matches were resolved, and serves it to CAMI over a REST API.</p>
+    <div class="flow">
+      <span><b>1</b> Collect</span><span><b>2</b> Clean</span><span><b>3</b> Match</span>
+      <span><b>4</b> Merge</span><span><b>5</b> Serve</span>
+    </div>
+  </div></header>
+
+  <div class="wrap">
+    <div class="stats">
+      @if(!isset($stats['error']))
+      <div class="stat"><div class="n">{{ $stats['identities'] }}</div><div class="l">Identities</div></div>
+      <div class="stat"><div class="n">{{ $stats['source_rows'] }}</div><div class="l">Source links</div></div>
+      <div class="stat"><div class="n">{{ $stats['profiles'] }}</div><div class="l">Profiles</div></div>
+      <div class="stat"><div class="n">{{ $stats['licenses'] }}</div><div class="l">Licenses</div></div>
+      <div class="stat"><div class="n">{{ $stats['exclusions'] }}</div><div class="l">Exclusions</div></div>
+      <div class="stat"><div class="n">{{ $stats['audit'] }}</div><div class="l">Survivorship logs</div></div>
+      @else
+      <div class="stat" style="grid-column:1/-1"><div class="l">hub unavailable: {{ $stats['error'] }}</div></div>
+      @endif
+    </div>
+  </div>
+
+  <div class="wrap">
+
+    <section>
+      <p class="eyebrow">Core capabilities</p>
+      <h2>What gp-cami does</h2>
+      <p class="sub">Everything below runs today against the local hub unless marked otherwise.</p>
+      <div class="cards">
+        <div class="card"><span class="ico">01</span><h3>Identity resolution <span class="badge live">live</span></h3><p>Two-pass matcher binds each raw source row to exactly one golden identity — deterministic keys first, probabilistic scoring for the rest.</p></div>
+        <div class="card"><span class="ico">02</span><h3>Cross-account scope <span class="badge live">live</span></h3><p>The same person under many clients resolves to one identity — collapsing duplicates across every account.</p></div>
+        <div class="card"><span class="ico">03</span><h3>Per-field survivorship <span class="badge live">live</span></h3><p>Each field's winner is chosen by source authority + recency; every decision logged to a survivorship audit trail.</p></div>
+        <div class="card"><span class="ico">04</span><h3>Enrichment rollups <span class="badge live">live</span></h3><p>Aliases, licenses, addresses, credential matches, and exclusion hits roll up to the identity with full provenance.</p></div>
+        <div class="card"><span class="ico">05</span><h3>Resolution reuse <span class="badge live">live</span></h3><p>A decision made once — under any account — is keyed to the identity and re-applied to later matches for the same person.</p></div>
+        <div class="card"><span class="ico">06</span><h3>Pinned decisions <span class="badge live">live</span></h3><p>A human review can pin a link so the engine never re-matches it — locked, reversible, auditable.</p></div>
+        <div class="card"><span class="ico">07</span><h3>Materialized profile <span class="badge live">live</span></h3><p>One denormalized wide row per identity — the full record in a single indexed read, rebuilt from the graph.</p></div>
+        <div class="card"><span class="ico">08</span><h3>REST API for CAMI <span class="badge live">live</span></h3><p>Two Sanctum-authed endpoints: name search, and credential resolution with qualifying-status filtering.</p></div>
+        <div class="card"><span class="ico">09</span><h3>SSN-safe matching <span class="badge live">live</span></h3><p>Matches on <code>sha512(ssn+key)</code>, stores ciphertext for parity, never returns SSN — <code>ssn_last_four</code> only.</p></div>
+        <div class="card"><span class="ico">10</span><h3>Board actions <span class="badge soon">schema ready</span></h3><p>Append-only disciplinary facts, never overwritten. Table + rollup in place; awaiting a board-action source.</p></div>
+        <div class="card"><span class="ico">11</span><h3>Multi-source hub <span class="badge soon">1 of 8</span></h3><p>New source = one connector + a config row, no engine change. streamline_local live; NPPES/LEIE/SAM/state next.</p></div>
+        <div class="card"><span class="ico">12</span><h3>Read-only source <span class="badge live">live</span></h3><p>The engine holds <code>SELECT</code>-only on every source and writes only the hub — enforced in code, no FK points at a source.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <p class="eyebrow">Matching engine</p>
+      <h2>How records resolve</h2>
+      <div class="pipe">
+        <div class="step"><div class="k">CONNECT</div><h4>Stage</h4><p>Source rows mapped into one canonical <code>stg_person</code> shape (+ alias/address/license). Engine never sees source schema.</p></div>
+        <div class="step"><div class="k">PASS A</div><h4>Deterministic</h4><p>Exact high-precision keys bind instantly: ssn_hash, npi, dea, upin, license+state, name+dob.</p></div>
+        <div class="step"><div class="k">PASS B</div><h4>Probabilistic</h4><p>Block, then weighted score (Jaro-Winkler name, dob, address, exclusion share). Auto-merge / review / new bands.</p></div>
+        <div class="step"><div class="k">GATE</div><h4>Hard-no</h4><p>Conflicting DOB or two different valid NPIs block any merge, however similar.</p></div>
+        <div class="step"><div class="k">MERGE</div><h4>Survivorship</h4><p>Per-field winner by authority + recency; profile re-materialized per affected identity.</p></div>
+      </div>
+      <h3 style="margin-top:22px">Deterministic keys (Pass A)</h3>
+      <ul class="k-list">
+        <li><span class="kn">ssn_hash</span> — 0.99</li>
+        <li><span class="kn">npi</span> — 0.99</li>
+        <li><span class="kn">dea_number</span> — 0.99</li>
+        <li><span class="kn">upin</span> — 0.99</li>
+        <li><span class="kn">license_number + certification_state</span> — 0.99</li>
+        <li><span class="kn">name + dob</span> — 0.95</li>
+      </ul>
+    </section>
+
+    <section>
+      <p class="eyebrow">Run modes</p>
+      <h2>Commands &amp; operations</h2>
+      <table>
+        <tr><th>Command</th><th>Mode</th><th>What it does</th></tr>
+        <tr><td><code>gp:backfill</code></td><td>Mode 1</td><td>Resolve every source record — the one-time backlog. Keyset-paged, resumable, idempotent.</td></tr>
+        <tr><td><code>gp:sync</code></td><td>Mode 2</td><td>Incremental — only rows changed since the watermark. Idempotent re-runs.</td></tr>
+        <tr><td><code>gp:rebuild-profile</code></td><td>Serving</td><td>Re-materialize <code>gp_identity_profile</code> for one identity or all.</td></tr>
+      </table>
+    </section>
+
+    <section>
+      <p class="eyebrow">Data model</p>
+      <h2>What gets stored</h2>
+      <p class="sub">A relational graph: one identity node, evidence/attribute rows, one-to-many collections, and a denormalized read model — {{ isset($stats['tables']) ? count($stats['tables']) : '17+' }} tables on the <code>golden_profile</code> hub.</p>
+      <table>
+        <tr><th>Table</th><th>Holds</th></tr>
+        <tr><td><code>gp_identity</code></td><td>One resolved real person; canonical keys.</td></tr>
+        <tr><td><code>gp_source_link</code></td><td>Each source row bound to one identity; match_state incl. pinned.</td></tr>
+        <tr><td><code>gp_license</code> / <code>gp_address</code></td><td>One-to-many licenses (state/board) and addresses.</td></tr>
+        <tr><td><code>gp_identity_credential</code> / <code>gp_identity_exclusion</code></td><td>Credential + exclusion rollups with link_state candidates.</td></tr>
+        <tr><td><code>gp_board_action</code></td><td>Append-only disciplinary actions.</td></tr>
+        <tr><td><code>gp_identity_resolution</code></td><td>Reusable, cross-account resolution decisions.</td></tr>
+        <tr><td><code>gp_attribute</code> / <code>gp_survivorship_audit</code></td><td>Per-field provenance and the winner-selection audit trail.</td></tr>
+        <tr><td><code>gp_identity_profile</code></td><td>Denormalized wide row — the full golden record.</td></tr>
+      </table>
+    </section>
+
+    <section>
+      <p class="eyebrow">Interface</p>
+      <h2>REST API</h2>
+      <p class="sub">JSON in/out, Sanctum bearer auth, 120 req/min. Full reference on the <a href="/docs">API Docs</a> page.</p>
+      <table>
+        <tr><th>Endpoint</th><th>Purpose</th></tr>
+        <tr><td><code>POST /api/v1/identity-search</code></td><td>Name-only search → every matching identity with all associated data (aliases, licenses, exclusions, resolutions).</td></tr>
+        <tr><td><code>POST /api/v1/credential-search</code></td><td>Resolve one person → latest qualifying credential match + prior resolution.</td></tr>
+      </table>
+    </section>
+
+    <footer>gp-cami · Golden Profile · features rendered from the live hub on {{ $generatedAt }} · <a href="/docs">API Docs →</a></footer>
+  </div>
+</body>
+</html>
