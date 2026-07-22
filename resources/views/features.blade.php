@@ -73,6 +73,21 @@
   .k-list li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--gold);border-radius:6px;padding:9px 12px;font-size:.86rem}
   .k-list .kn{font-family:var(--mono);color:var(--navy);font-weight:700}
   @media (prefers-color-scheme:dark){.k-list .kn{color:var(--gold-light)}}
+  /* process diagrams */
+  .flowd{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:10px;padding:18px 20px;margin:14px 0;overflow-x:auto}
+  .flowd .cap{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-faint);margin:0 0 14px}
+  .frow{display:flex;align-items:center;flex-wrap:nowrap;min-width:max-content}
+  .fnode{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 13px;text-align:center;min-width:104px}
+  .fnode .t{font-weight:700;color:var(--navy);display:block;font-size:.84rem}
+  @media (prefers-color-scheme:dark){.fnode .t{color:#e7ebf0}}
+  .fnode .d{color:var(--ink-faint);font-size:.7rem;font-family:var(--mono);display:block;margin-top:2px}
+  .fnode.src{border-top:3px solid var(--navy)} .fnode.store{border-top:3px solid var(--gold)}
+  .fnode.out{border-top:3px solid var(--orange)} .fnode.dec{background:var(--warn-wash);border-color:var(--warn)}
+  .farrow{color:var(--gold);font-weight:800;padding:0 9px;font-size:1.05rem;flex:0 0 auto}
+  .fstack{display:flex;flex-direction:column;gap:7px}
+  .flabel{font-family:var(--mono);font-size:10px;color:var(--ink-faint);margin-right:6px;flex:0 0 auto}
+  .fnode.mini{min-width:0;padding:6px 10px;font-size:.78rem}
+  .fnode.ok{border-left:3px solid var(--ok)} .fnode.rev{border-left:3px solid var(--warn)} .fnode.new{border-left:3px solid var(--ink-faint)} .fnode.no{border-left:3px solid var(--crit)}
   footer{padding:26px 0 46px;color:var(--ink-faint);font-family:var(--mono);font-size:12px}
   @media (max-width:900px){.cards{grid-template-columns:1fr 1fr}.stats{grid-template-columns:repeat(3,1fr)}.k-list{grid-template-columns:1fr}}
   @media (max-width:560px){.cards,.stats{grid-template-columns:1fr}}
@@ -150,6 +165,110 @@
         <li><span class="kn">license_number + certification_state</span> — 0.99</li>
         <li><span class="kn">name + dob</span> — 0.95</li>
       </ul>
+    </section>
+
+    <section>
+      <p class="eyebrow">How it works</p>
+      <h2>The golden profile process</h2>
+      <p class="sub">From raw source rows to an answered identity search — extraction, staging, resolution,
+      survivorship, sync, and serving. Each diagram scrolls sideways on small screens.</p>
+
+      <h3>1 · End-to-end pipeline</h3>
+      <div class="flowd">
+        <p class="cap">Collect → clean → match → merge → serve</p>
+        <div class="frow">
+          <div class="fnode src"><span class="t">Sources</span><span class="d">streamline_local (+8 planned)</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">Connector</span><span class="d">clean &amp; map</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode store"><span class="t">stg_person</span><span class="d">canonical staging</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">Resolution</span><span class="d">Pass A + Pass B</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">Survivorship</span><span class="d">per-field winner</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode store"><span class="t">gp_identity_profile</span><span class="d">wide golden row</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode out"><span class="t">API / Search</span><span class="d">→ CAMI</span></div>
+        </div>
+      </div>
+
+      <h3>2 · Data extraction &amp; staging</h3>
+      <div class="flowd">
+        <p class="cap">gp:backfill — one row at a time, idempotent, read-only source</p>
+        <div class="frow">
+          <div class="fnode src"><span class="t">employees</span><span class="d">+ alt_* columns</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">StreamlineLocalConnector</span><span class="d">trim / normalize / resolve account</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fstack">
+            <div class="fnode store mini"><span class="t">stg_person</span></div>
+            <div class="fnode store mini"><span class="t">stg_person_alias</span></div>
+            <div class="fnode store mini"><span class="t">stg_person_address</span></div>
+            <div class="fnode store mini"><span class="t">stg_person_license</span></div>
+          </div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">block_key</span><span class="d">soundex(last)+dob_yr</span></div>
+        </div>
+      </div>
+
+      <h3>3 · Resolution &amp; calculation</h3>
+      <div class="flowd">
+        <p class="cap">Two passes; hard-no safeguards; then survivorship + re-materialize</p>
+        <div class="frow">
+          <div class="fnode store"><span class="t">staged record</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode dec"><span class="t">Pass A</span><span class="d">deterministic keys</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fstack">
+            <div class="frow"><span class="flabel">hit</span><div class="fnode mini ok"><span class="t">bind identity</span></div></div>
+            <div class="frow"><span class="flabel">miss</span><div class="fnode dec mini"><span class="t">Pass B: block → score</span></div></div>
+          </div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fstack">
+            <div class="fnode mini ok"><span class="t">≥ 0.92 auto-match</span></div>
+            <div class="fnode mini rev"><span class="t">0.75–0.92 review</span></div>
+            <div class="fnode mini new"><span class="t">&lt; 0.75 new identity</span></div>
+            <div class="fnode mini no"><span class="t">hard-no: dob/NPI conflict → blocked</span></div>
+          </div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">Survivorship</span><span class="d">authority + recency</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode store"><span class="t">profile rebuilt</span></div>
+        </div>
+      </div>
+
+      <h3>4 · Incremental sync</h3>
+      <div class="flowd">
+        <p class="cap">gp:sync — only what changed since the watermark</p>
+        <div class="frow">
+          <div class="fnode store"><span class="t">gp_watermark</span><span class="d">last cursor</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode src"><span class="t">changed rows</span><span class="d">date_modified &gt; watermark</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">re-stage</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">re-resolve</span><span class="d">Pass A / B</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode store"><span class="t">re-materialize</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">advance watermark</span></div>
+        </div>
+      </div>
+
+      <h3>5 · Identity search</h3>
+      <div class="flowd">
+        <p class="cap">One indexed read of the materialized profile — no joins, no SSN exposure</p>
+        <div class="frow">
+          <div class="fnode out"><span class="t">CAMI / dashboard</span><span class="d">last + first name</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode"><span class="t">match</span><span class="d">canonical + aliases</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode store"><span class="t">gp_identity_profile</span><span class="d">PK / name index</span></div>
+          <span class="farrow">&rsaquo;</span>
+          <div class="fnode out"><span class="t">results</span><span class="d">ssn_last_four only</span></div>
+        </div>
+      </div>
     </section>
 
     <section>
