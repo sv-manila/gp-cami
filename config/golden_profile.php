@@ -121,8 +121,8 @@ return [
         'excluded_status_codes'   => [0, 10, 50, 60, 100],
         'respect_expiry_date'     => true, // expiry_date IS NULL OR expiry_date >= CURDATE()
         // never roll these into the hub at all: 10 (Pending), 100 (Error),
-        // 85 (Invalid - Incorrect License # Format)
-        'rollup_exclude_status_codes' => [10, 100, 85],
+        // 85 (Invalid - Incorrect License # Format), 80 (Invalid - No NPI Match)
+        'rollup_exclude_status_codes' => [10, 100, 85, 80],
     ],
 
 ];
