@@ -81,7 +81,7 @@
 <body>
   <div class="topbar"><div class="wrap">
     <div class="brand">gp&#8209;<b>cami</b></div>
-    <nav class="topnav"><a href="/features" class="active">Features</a><a href="/docs">API Docs</a><a href="/search" class="btn">Search</a></nav>
+    <nav class="topnav"><a href="/features" class="active">Features</a><a href="/docs">API Docs</a><a href="/search">Identity Search</a></nav>
   </div></div>
 
   <header class="hero"><div class="wrap">

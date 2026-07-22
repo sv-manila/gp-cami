@@ -61,7 +61,7 @@
     <nav class="topnav">
       <a href="/features">Features</a>
       <a href="/docs">API Docs</a>
-      <a href="/search" class="btn active">Search</a>
+      <a href="/search" class="active">Identity Search</a>
     </nav>
   </div></div>
 

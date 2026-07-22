@@ -69,7 +69,7 @@
     <nav>
       <span class="grp">Site</span>
       <a href="/features">← Features &amp; capabilities</a>
-      <a href="/search">🔍 Search identities</a>
+      <a href="/search">Identity Search</a>
       <span class="grp">Overview</span>
       <a href="#intro">Introduction</a>
       <a href="#base">Base URL</a>
