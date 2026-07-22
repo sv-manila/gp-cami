@@ -22,7 +22,10 @@ Route::get('/features', function () use ($baseUrl) {
             'exclusions' => $hub->table('gp_identity_exclusion')->count(),
             'audit' => $hub->table('gp_survivorship_audit')->count(),
             'sources' => $hub->table('gp_source_system')->count(),
-            'tables' => $hub->getSchemaBuilder()->getTableListing(),
+            'model_tables' => count(array_filter(
+                $hub->getSchemaBuilder()->getTableListing(),
+                fn ($t) => str_contains($t, 'gp_') || str_contains($t, 'stg_'),
+            )),
         ];
     } catch (\Throwable $e) {
         $stats = ['error' => $e->getMessage()];

@@ -164,7 +164,7 @@
     <section>
       <p class="eyebrow">Data model</p>
       <h2>What gets stored</h2>
-      <p class="sub">A relational graph: one identity node, evidence/attribute rows, one-to-many collections, and a denormalized read model — {{ isset($stats['tables']) ? count($stats['tables']) : '17+' }} tables on the <code>golden_profile</code> hub.</p>
+      <p class="sub">A relational graph: one identity node, evidence/attribute rows, one-to-many collections, and a denormalized read model — {{ $stats['model_tables'] ?? '17+' }} <code>gp_*</code>/<code>stg_*</code> tables on the <code>golden_profile</code> hub.</p>
       <table>
         <tr><th>Table</th><th>Holds</th></tr>
         <tr><td><code>gp_identity</code></td><td>One resolved real person; canonical keys.</td></tr>

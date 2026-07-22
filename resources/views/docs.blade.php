@@ -145,7 +145,7 @@ Content-Type: application/json</pre>
     {
       "identity_id": 10,
       "identity_uuid": "a0108593-...",
-      "first_name": "Paula", "last_name": "Adkins",
+      "first_name": "Paula", "middle_name": null, "last_name": "Adkins",
       "date_of_birth": "1975-04-12",
       "ssn_last_four": "6789",
       "npi": null, "upin": null, "dea_number": null,
@@ -155,6 +155,7 @@ Content-Type: application/json</pre>
       "aliases": [ { "type": "maiden", "first": null, "last": "..." } ],
       "licenses": [ { "number": "...", "state": "CA", "type": "RN", "verified": false } ],
       "addresses": [], "accounts": [ 42 ],
+      "source_records": [ { "system_code": "streamline_local", "source_table": "employees", "source_id": 123, "account_id": 42 } ],
       "credentials": [], "exclusions": [ { "match_id": 1, "registry": "...", "link_state": "candidate" } ],
       "has_active_exclusion": true,
       "resolutions": [],
