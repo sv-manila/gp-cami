@@ -50,6 +50,12 @@ class ProfileMaterializer
                 'registry' => $l->registry, 'verified' => (bool) $l->is_verified,
             ])->values();
 
+        $identifiers = $hub->table('gp_identity_identifier')->where('identity_id', $identityId)->get()
+            ->map(fn ($r) => ['type' => $r->id_type, 'value' => $r->id_value])
+            ->unique(fn ($r) => $r['type'].'|'.$r['value'])->values();
+        // Fall back the profile's dea_number column to a DEA identifier for display.
+        $deaFromIdentifier = $identifiers->firstWhere('type', 'dea')['value'] ?? null;
+
         $addresses = $hub->table('gp_address')->where('identity_id', $identityId)->get();
         $primary = $addresses->firstWhere('is_primary', 1) ?? $addresses->first();
         $addressJson = $addresses->map(fn ($a) => [
@@ -109,7 +115,9 @@ class ProfileMaterializer
                 'ssn_last_four' => $this->ssnLastFour($stgIds),
                 'npi' => $identity->npi,
                 'upin' => $identity->upin,
-                'dea_number' => $identity->dea_number,
+                'dea_number' => $identity->dea_number ?: $deaFromIdentifier,
+                'identifier_count' => $identifiers->count(),
+                'identifiers' => $identifiers->toJson(),
                 'address1' => $primary->address1 ?? null,
                 'city' => $primary->city ?? null,
                 'state' => $primary->state ?? null,

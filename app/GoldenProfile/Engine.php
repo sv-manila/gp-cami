@@ -257,6 +257,7 @@ class Engine
                 $round += $this->mergeByColumn($col, $shard, $shards);
             }
             $round += $this->mergeByLicense($shard, $shards);
+            $round += $this->mergeByIdentifier($shard, $shards);
             $round += $this->mergeByNameDob($shard, $shards);
             $merged += $round;
             if ($progress) {
@@ -317,6 +318,33 @@ class Engine
             $q = $g->certification_board === null
                 ? $q->whereNull('certification_board') : $q->where('certification_board', $g->certification_board);
             $ids = $q->orderBy('gp_identity.identity_id')->distinct()->pluck('gp_identity.identity_id')->all();
+            $survivor = (int) array_shift($ids);
+            foreach ($ids as $loser) {
+                $n += $this->mergeIdentity($survivor, (int) $loser);
+            }
+        }
+
+        return $n;
+    }
+
+    /** Merge active identities sharing a multi-valued identifier (DEA, MMIS). */
+    private function mergeByIdentifier(int $shard = 0, int $shards = 1): int
+    {
+        $hub = $this->hub();
+        $n = 0;
+        $q = $hub->table('gp_identity_identifier as gii')
+            ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+            ->where('gi.status', 'active')
+            ->select('gii.id_type', 'gii.id_value');
+        $q = $this->shardFilter($q, "CONCAT_WS('|',gii.id_type,gii.id_value)", $shard, $shards);
+        $groups = $q->groupBy('gii.id_type', 'gii.id_value')
+            ->havingRaw('COUNT(DISTINCT gii.identity_id) > 1')->get();
+        foreach ($groups as $g) {
+            $ids = $hub->table('gp_identity_identifier as gii')
+                ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+                ->where('gi.status', 'active')
+                ->where('gii.id_type', $g->id_type)->where('gii.id_value', $g->id_value)
+                ->orderBy('gii.identity_id')->distinct()->pluck('gii.identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
                 $n += $this->mergeIdentity($survivor, (int) $loser);
@@ -414,6 +442,8 @@ class Engine
             ['license_number', 'certification_state', 'certification_board']);
         $this->repointDeduped('gp_address', 'address_id', $survivor, $loser,
             ['address1', 'city', 'state', 'zip']);
+        $this->repointDeduped('gp_identity_identifier', 'id', $survivor, $loser,
+            ['id_type', 'id_value']);
 
         // Rebuilt from scratch by finalize — just remove the loser's copies.
         foreach (['gp_attribute', 'gp_survivorship_audit', 'gp_identity_profile'] as $t) {
