@@ -90,12 +90,8 @@ class DeterministicResolver
             'linked_at' => now(),
         ]);
 
-        // record count + freshness
-        $hub->table('gp_identity')->where('identity_id', $identityId)->update([
-            'record_count' => $hub->table('gp_source_link')->where('identity_id', $identityId)->count(),
-            'last_updated' => now(),
-        ]);
-
+        // record_count + freshness are set during finalize (Survivorship),
+        // which already loads every linked row — avoids a per-row COUNT+UPDATE.
         $this->enrich($identityId, $p, $licenses, $linkId);
 
         return $identityId;

@@ -102,10 +102,11 @@ class Survivorship
             ];
         }
 
-        if ($update) {
-            $update['last_updated'] = $now;
-            $hub->table('gp_identity')->where('identity_id', $identityId)->update($update);
-        }
+        // record_count + freshness folded in here (this method already loaded
+        // every linked row) so the resolver skips a per-row COUNT+UPDATE.
+        $update['record_count'] = $rows->count();
+        $update['last_updated'] = $now;
+        $hub->table('gp_identity')->where('identity_id', $identityId)->update($update);
 
         // rewrite provenance for identity attributes (idempotent per identity)
         $names = array_keys(self::IDENTITY_FIELDS);

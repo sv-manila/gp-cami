@@ -30,15 +30,22 @@ class StreamlineLocalConnector
     /**
      * Ingest one employee row into staging. Idempotent on
      * (system_id, source_table, source_id). Returns stg_person_id.
+     *
+     * $accountMap (employeelist_id => account_id) lets the caller batch the
+     * source-side employeelists lookup once per chunk instead of once per row —
+     * critical when the source is a high-latency (WAN) connection. When null,
+     * falls back to a per-row source lookup.
      */
-    public function ingest(object $emp): int
+    public function ingest(object $emp, ?array $accountMap = null): int
     {
         $now = now();
 
         $accountId = null;
         if ($emp->employeelist_id) {
-            $accountId = $this->src()->table('employeelists')
-                ->where('id', $emp->employeelist_id)->value('account_id');
+            $accountId = $accountMap !== null
+                ? ($accountMap[$emp->employeelist_id] ?? null)
+                : $this->src()->table('employeelists')
+                    ->where('id', $emp->employeelist_id)->value('account_id');
         }
 
         $npi = (int) ($emp->npi ?? 0);
@@ -69,27 +76,35 @@ class StreamlineLocalConnector
             'block_key' => $blockKey,
         ];
 
-        $this->hub()->table('stg_person')->updateOrInsert(
-            ['system_id' => $this->systemId, 'source_table' => self::SOURCE_TABLE, 'source_id' => $emp->id],
-            $row,
-        );
+        // Select-first instead of updateOrInsert: on a fresh load the common
+        // path is a brand-new row, and knowing it's new lets us skip the three
+        // child-table deletes (nothing to delete) and the id re-select.
+        $key = ['system_id' => $this->systemId, 'source_table' => self::SOURCE_TABLE, 'source_id' => $emp->id];
+        $stgId = (int) $this->hub()->table('stg_person')->where($key)->value('stg_person_id');
+        $isNew = $stgId === 0;
 
-        $stgId = (int) $this->hub()->table('stg_person')
-            ->where(['system_id' => $this->systemId, 'source_table' => self::SOURCE_TABLE, 'source_id' => $emp->id])
-            ->value('stg_person_id');
+        if ($isNew) {
+            $stgId = (int) $this->hub()->table('stg_person')->insertGetId($row);
+        } else {
+            $this->hub()->table('stg_person')->where($key)->update($row);
+        }
 
-        $this->rebuildChildren($stgId, $emp);
+        $this->rebuildChildren($stgId, $emp, $isNew);
 
         return $stgId;
     }
 
     /** Rebuild the flattened alias/address/license children for a staged person. */
-    private function rebuildChildren(int $stgId, object $emp): void
+    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false): void
     {
         $hub = $this->hub();
-        $hub->table('stg_person_alias')->where('stg_person_id', $stgId)->delete();
-        $hub->table('stg_person_address')->where('stg_person_id', $stgId)->delete();
-        $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
+        // A freshly inserted staged person has no children yet — skip the
+        // three (empty) deletes that dominate the fresh-load per-row cost.
+        if (! $isNew) {
+            $hub->table('stg_person_alias')->where('stg_person_id', $stgId)->delete();
+            $hub->table('stg_person_address')->where('stg_person_id', $stgId)->delete();
+            $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
+        }
 
         // ---- aliases ----
         $aliases = [];

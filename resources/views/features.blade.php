@@ -143,6 +143,8 @@
         <div class="card"><span class="ico">10</span><h3>Board actions <span class="badge soon">schema ready</span></h3><p>Append-only disciplinary facts, never overwritten. Table + rollup in place; awaiting a board-action source.</p></div>
         <div class="card"><span class="ico">11</span><h3>Multi-source hub <span class="badge soon">1 of 8</span></h3><p>New source = one connector + a config row, no engine change. streamline_local live; NPPES/LEIE/SAM/state next.</p></div>
         <div class="card"><span class="ico">12</span><h3>Read-only source <span class="badge live">live</span></h3><p>The engine holds <code>SELECT</code>-only on every source and writes only the hub — enforced in code, no FK points at a source.</p></div>
+        <div class="card"><span class="ico">13</span><h3>Parallel backfill <span class="badge live">live</span></h3><p>Load partitions across N workers (per-worker resume cursor), then <code>gp:dedup</code> merges cross-partition duplicates and finalize runs sharded — scales the one-time backlog near-linearly.</p></div>
+        <div class="card"><span class="ico">14</span><h3>Resumable &amp; batched <span class="badge live">live</span></h3><p>Chunked keyset paging checkpoints after every chunk — stop and restart continues where it left off. Source lookups and rollups batch per chunk; materialization is deferred to one pass.</p></div>
       </div>
     </section>
 
@@ -195,7 +197,7 @@
 
       <h3>2 · Data extraction &amp; staging</h3>
       <div class="flowd">
-        <p class="cap">gp:backfill — one row at a time, idempotent, read-only source</p>
+        <p class="cap">gp:backfill — chunked keyset paging, batched source reads, resumable, read-only source</p>
         <div class="frow">
           <div class="fnode src"><span class="t">employees</span><span class="d">+ alt_* columns</span></div>
           <span class="farrow">&rsaquo;</span>
@@ -331,10 +333,18 @@
       <h2>Commands &amp; operations</h2>
       <table>
         <tr><th>Command</th><th>Mode</th><th>What it does</th></tr>
-        <tr><td><code>gp:backfill</code></td><td>Mode 1</td><td>Resolve every source record — the one-time backlog. Keyset-paged, resumable, idempotent.</td></tr>
+        <tr><td><code>gp:backfill</code></td><td>Mode 1</td><td>Resolve every source record — the one-time backlog. Keyset-paged, resumable (per-segment cursor), idempotent. Deferred materialization by default. Options: <code>--from-id</code>/<code>--to-id</code> (partition), <code>--segment</code> (parallel worker), <code>--no-finalize</code>, <code>--finalize-only --shard=i --shards=N</code> (sharded materialize), <code>--restart</code>.</td></tr>
+        <tr><td><code>gp:dedup</code></td><td>Mode 1</td><td>Merge identities that share a deterministic key (ssn/npi/upin/dea/license/name+dob) — run after parallel load to fold cross-partition duplicates. Idempotent; shardable via <code>--shard</code>/<code>--shards</code> with row-locked merges.</td></tr>
         <tr><td><code>gp:sync</code></td><td>Mode 2</td><td>Incremental — only rows changed since the watermark. Idempotent re-runs.</td></tr>
         <tr><td><code>gp:rebuild-profile</code></td><td>Serving</td><td>Re-materialize <code>gp_identity_profile</code> for one identity or all.</td></tr>
       </table>
+      <h3 style="margin-top:22px">Parallel backfill pipeline</h3>
+      <p class="sub" style="margin-bottom:10px">For the one-time backlog at scale, <code>scripts/backfill-parallel.sh</code> orchestrates the whole run co-located with the hub: N id-partitioned load workers → sharded <code>gp:dedup</code> + a serial mop-up pass → sharded finalize. Each stage is resumable and idempotent.</p>
+      <div class="pipe">
+        <div class="step"><div class="k">FAN OUT</div><h4>Load workers</h4><p>N workers over disjoint id ranges, each with its own resume cursor (<code>--segment</code>), materialization deferred.</p></div>
+        <div class="step"><div class="k">DEDUP</div><h4>Merge duplicates</h4><p>Hash-partitioned shards merge identities that share a key across partitions; a final serial pass converges transitive merges.</p></div>
+        <div class="step"><div class="k">FINALIZE</div><h4>Sharded materialize</h4><p>Survivorship + profile rebuild split across N shards by <code>identity_id</code>.</p></div>
+      </div>
     </section>
 
     <section>

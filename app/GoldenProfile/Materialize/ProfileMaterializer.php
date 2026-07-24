@@ -148,13 +148,19 @@ class ProfileMaterializer
         if ($links->isEmpty()) {
             return collect();
         }
+        // Batch by (system_id, source_table): one query per group with an
+        // IN() on source_id, instead of one query per link (N+1).
         $hub = $this->hub();
         $ids = collect();
-        foreach ($links as $l) {
-            $sid = $hub->table('stg_person')->where([
-                'system_id' => $l->system_id, 'source_table' => $l->source_table, 'source_id' => $l->source_id,
-            ])->value('stg_person_id');
-            if ($sid) {
+        foreach ($links->groupBy(fn ($l) => $l->system_id.'|'.$l->source_table) as $group) {
+            $first = $group->first();
+            $sourceIds = $group->pluck('source_id')->unique()->all();
+            $found = $hub->table('stg_person')
+                ->where('system_id', $first->system_id)
+                ->where('source_table', $first->source_table)
+                ->whereIn('source_id', $sourceIds)
+                ->pluck('stg_person_id');
+            foreach ($found as $sid) {
                 $ids->push((int) $sid);
             }
         }

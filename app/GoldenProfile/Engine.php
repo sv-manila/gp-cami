@@ -68,20 +68,67 @@ class Engine
         return (int) $hub->table('gp_source_system')->where('system_code', self::SYSTEM_CODE)->value('system_id');
     }
 
-    /** Mode 1 — full backfill over every employee. Returns count processed. */
-    public function backfill(?int $fromId = null, int $chunk = 1000, ?callable $progress = null): int
+    /**
+     * Mode 1 — full backfill over every employee. Returns count processed.
+     *
+     * For bulk loads survivorship + profile materialization are deferred: the
+     * load phase only builds the graph (ingest -> resolve -> rollups), then a
+     * single finalize pass recomputes survivorship and rebuilds every profile.
+     * This turns ~30 per-row hub queries (per-row finalize) into one pass over
+     * distinct identities — the dominant cost for a bulk load. Deterministic
+     * matching is unaffected: createIdentity seeds canonical_* from the first
+     * row, so name/dob keys resolve during load. Pass $defer=false to keep the
+     * legacy per-chunk finalize.
+     *
+     * Options (all optional):
+     *   fromId (int)   start at this source id (inclusive); null => resume from cursor
+     *   toId (int)     stop at this source id (inclusive) — for partitioned parallel runs
+     *   chunk (int)    rows per chunk (default 1000); also the resume granularity
+     *   segment (str)  namespaces the resume cursor so parallel workers don't collide
+     *   defer (bool)   defer survivorship/materialization to one pass (default true)
+     *   finalize (bool) run that deferred pass at the end (default true); set false for
+     *                  parallel workers and run finalizeAll() once after all finish
+     *   progress (callable)         fn(int $count) — load-phase progress
+     *   finalizeProgress (callable) fn(int $done, int $total) — finalize-phase progress
+     */
+    public function backfill(array $opts = []): int
     {
+        $fromId = $opts['fromId'] ?? null;
+        $toId = $opts['toId'] ?? null;
+        $chunk = $opts['chunk'] ?? 1000;
+        $segment = $opts['segment'] ?? 'default';
+        $defer = $opts['defer'] ?? true;
+        $finalize = $opts['finalize'] ?? true;
+        $progress = $opts['progress'] ?? null;
+        $finalizeProgress = $opts['finalizeProgress'] ?? null;
+
         $count = 0;
         $maxModified = null;
+
+        // Resume support: pick up just past this segment's last checkpoint.
+        // max() so it works whether or not an explicit fromId was given —
+        // re-running the identical command continues instead of restarting,
+        // while a checkpoint ahead of fromId still wins. Use --restart (which
+        // clears the cursor) to force a fresh pass. Idempotent, so re-covering
+        // the final in-flight chunk on resume is harmless.
+        $cursor = $this->backfillCursor($segment);
+        if ($cursor !== null) {
+            $fromId = max((int) $fromId, $cursor + 1);
+        }
+
         $q = $this->src()->table(self::SOURCE_TABLE)->orderBy('id');
         if ($fromId) {
             $q->where('id', '>=', $fromId);
         }
-        $q->chunkById($chunk, function ($rows) use (&$count, &$maxModified, $progress) {
+        if ($toId) {
+            $q->where('id', '<=', $toId);
+        }
+        $q->chunkById($chunk, function ($rows) use (&$count, &$maxModified, $progress, $defer, $segment) {
+            $accountMap = $this->accountMapFor($rows);
             $identityIds = [];
             $empIds = [];
             foreach ($rows as $emp) {
-                $stgId = $this->connector->ingest($emp);
+                $stgId = $this->connector->ingest($emp, $accountMap);
                 $identityIds[$this->resolver->resolve($stgId)] = true;
                 $empIds[] = $emp->id;
                 if ($emp->date_modified && $emp->date_modified > $maxModified) {
@@ -91,17 +138,305 @@ class Engine
             }
             $this->rollupCredentials($empIds);
             $this->rollupExclusions($empIds);
-            $this->finalize($identityIds);
+            if (! $defer) {
+                $this->finalize($identityIds);
+            }
+            // Checkpoint the load phase (rows are ordered by id -> last = max).
+            $this->setBackfillCursor((int) $rows->last()->id, $segment);
             if ($progress) {
                 $progress($count);
             }
         }, 'id');
 
+        if ($defer && $finalize) {
+            $this->finalizeAll($finalizeProgress);
+        }
+
         if ($maxModified) {
             $this->setWatermark(self::SOURCE_TABLE, $maxModified);
         }
 
+        // Segment completed cleanly — drop its cursor so the next invocation is
+        // a fresh pass rather than a no-op resume from the end.
+        $this->clearBackfillCursor($segment);
+
         return $count;
+    }
+
+    private const BACKFILL_CURSOR_KEY = 'employees:bf_cursor';
+
+    private function cursorKey(string $segment): string
+    {
+        return self::BACKFILL_CURSOR_KEY.':'.$segment;
+    }
+
+    /** Last source id checkpointed by an in-progress backfill segment, or null. */
+    public function backfillCursor(string $segment = 'default'): ?int
+    {
+        $v = $this->hub()->table('gp_watermark')
+            ->where(['system_id' => $this->systemId, 'source_table' => $this->cursorKey($segment)])
+            ->value('high_water');
+
+        return $v !== null ? (int) $v : null;
+    }
+
+    private function setBackfillCursor(int $id, string $segment = 'default'): void
+    {
+        $this->hub()->table('gp_watermark')->updateOrInsert(
+            ['system_id' => $this->systemId, 'source_table' => $this->cursorKey($segment)],
+            ['high_water' => (string) $id, 'updated_at' => now()],
+        );
+    }
+
+    public function clearBackfillCursor(string $segment = 'default'): void
+    {
+        $this->hub()->table('gp_watermark')
+            ->where(['system_id' => $this->systemId, 'source_table' => $this->cursorKey($segment)])
+            ->delete();
+    }
+
+    /**
+     * Recompute survivorship + rebuild the profile for every identity, chunked.
+     *
+     * Shardable for parallel finalize: shard s of $shards handles identities
+     * where identity_id % shards == s. Run $shards processes with s = 0..N-1,
+     * each disjoint, so the materialization pass scales like the load. Default
+     * (shard 0 of 1) processes everything.
+     */
+    public function finalizeAll(?callable $progress = null, int $shard = 0, int $shards = 1): void
+    {
+        $q = fn () => $this->hub()->table('gp_identity')
+            ->when($shards > 1, fn ($qq) => $qq->whereRaw('identity_id % ? = ?', [$shards, $shard]));
+
+        $total = (int) $q()->count();
+        $done = 0;
+        $q()->orderBy('identity_id')
+            ->chunkById(500, function ($ids) use (&$done, $progress, $total) {
+                foreach ($ids as $row) {
+                    $this->survivorship->recompute((int) $row->identity_id);
+                    $this->materializer->rebuild((int) $row->identity_id);
+                    $done++;
+                }
+                if ($progress) {
+                    $progress($done, $total);
+                }
+            }, 'identity_id');
+
+        if ($progress) {
+            $progress($total, $total);
+        }
+    }
+
+    /**
+     * Consolidate identities that share a deterministic key — ssn_hash, npi,
+     * upin, dea_number, license (number+state+board), or name+dob. Parallel
+     * id-partitioned loading can mint separate identities for the same person
+     * across partitions; this pass merges them so the graph matches what a
+     * single-threaded load would have produced. Idempotent. Run AFTER all load
+     * workers finish and BEFORE finalizeAll (survivors are re-materialized by
+     * finalize from their merged source links).
+     *
+     * Iterates to a fixed point: a merge lets the survivor inherit the loser's
+     * keys, which can expose further (transitive) matches on the next pass.
+     *
+     * Shardable for parallel runs: shard s of $shards handles only key groups
+     * whose value hashes to s (CRC32(value) % shards). Run S processes with
+     * s = 0..S-1, THEN one serial pass (shards = 1) to converge any transitive
+     * merges whose inherited key crossed a shard boundary. Merges are wrapped
+     * in a row-locked transaction, so concurrent shards can't corrupt a shared
+     * survivor/loser.
+     *
+     * @return int identities merged away
+     */
+    public function dedup(?callable $progress = null, int $shard = 0, int $shards = 1): int
+    {
+        $merged = 0;
+        do {
+            $round = 0;
+            foreach (['ssn_hash', 'npi', 'upin', 'dea_number'] as $col) {
+                $round += $this->mergeByColumn($col, $shard, $shards);
+            }
+            $round += $this->mergeByLicense($shard, $shards);
+            $round += $this->mergeByNameDob($shard, $shards);
+            $merged += $round;
+            if ($progress) {
+                $progress($merged);
+            }
+        } while ($round > 0);
+
+        return $merged;
+    }
+
+    /** Restrict a group query to this shard by hashing the key expression. */
+    private function shardFilter($q, string $expr, int $shard, int $shards)
+    {
+        return $shards > 1 ? $q->whereRaw("CRC32($expr) % ? = ?", [$shards, $shard]) : $q;
+    }
+
+    /** Merge active identities sharing a non-null value in $col. */
+    private function mergeByColumn(string $col, int $shard = 0, int $shards = 1): int
+    {
+        // $col is from a fixed internal whitelist — safe to interpolate.
+        $hub = $this->hub();
+        $n = 0;
+        $q = $hub->table('gp_identity')->whereNotNull($col)->where('status', 'active');
+        $q = $this->shardFilter($q, $col, $shard, $shards);
+        $dupVals = $q->groupBy($col)->havingRaw('COUNT(*) > 1')->pluck($col);
+        foreach ($dupVals as $val) {
+            $ids = $hub->table('gp_identity')
+                ->where($col, $val)->where('status', 'active')
+                ->orderBy('identity_id')->pluck('identity_id')->all();
+            $survivor = (int) array_shift($ids);
+            foreach ($ids as $loser) {
+                $n += $this->mergeIdentity($survivor, (int) $loser);
+            }
+        }
+
+        return $n;
+    }
+
+    /** Merge active identities that share a license (number + state + board). */
+    private function mergeByLicense(int $shard = 0, int $shards = 1): int
+    {
+        $hub = $this->hub();
+        $n = 0;
+        $q = $hub->table('gp_license')
+            ->join('gp_identity', 'gp_identity.identity_id', '=', 'gp_license.identity_id')
+            ->where('gp_identity.status', 'active')
+            ->select('license_number', 'certification_state', 'certification_board');
+        $q = $this->shardFilter($q, "CONCAT_WS('|',license_number,certification_state,certification_board)", $shard, $shards);
+        $groups = $q->groupBy('license_number', 'certification_state', 'certification_board')
+            ->havingRaw('COUNT(DISTINCT gp_identity.identity_id) > 1')->get();
+        foreach ($groups as $g) {
+            $q = $hub->table('gp_license')
+                ->join('gp_identity', 'gp_identity.identity_id', '=', 'gp_license.identity_id')
+                ->where('gp_identity.status', 'active')
+                ->where('license_number', $g->license_number);
+            $q = $g->certification_state === null
+                ? $q->whereNull('certification_state') : $q->where('certification_state', $g->certification_state);
+            $q = $g->certification_board === null
+                ? $q->whereNull('certification_board') : $q->where('certification_board', $g->certification_board);
+            $ids = $q->orderBy('gp_identity.identity_id')->distinct()->pluck('gp_identity.identity_id')->all();
+            $survivor = (int) array_shift($ids);
+            foreach ($ids as $loser) {
+                $n += $this->mergeIdentity($survivor, (int) $loser);
+            }
+        }
+
+        return $n;
+    }
+
+    /** Merge active identities sharing canonical first + last + dob (resolver's name_dob tier). */
+    private function mergeByNameDob(int $shard = 0, int $shards = 1): int
+    {
+        $hub = $this->hub();
+        $n = 0;
+        $q = $hub->table('gp_identity')
+            ->where('status', 'active')
+            ->whereNotNull('canonical_first')->whereNotNull('canonical_last')->whereNotNull('canonical_dob')
+            ->selectRaw('LOWER(canonical_first) f, LOWER(canonical_last) l, canonical_dob d');
+        $q = $this->shardFilter($q, "CONCAT_WS('|',LOWER(canonical_last),LOWER(canonical_first),canonical_dob)", $shard, $shards);
+        $groups = $q->groupBy('f', 'l', 'd')->havingRaw('COUNT(*) > 1')->get();
+        foreach ($groups as $g) {
+            $ids = $hub->table('gp_identity')
+                ->where('status', 'active')
+                ->whereRaw('LOWER(canonical_first) = ?', [$g->f])
+                ->whereRaw('LOWER(canonical_last) = ?', [$g->l])
+                ->whereDate('canonical_dob', $g->d)
+                ->orderBy('identity_id')->pluck('identity_id')->all();
+            $survivor = (int) array_shift($ids);
+            foreach ($ids as $loser) {
+                $n += $this->mergeIdentity($survivor, (int) $loser);
+            }
+        }
+
+        return $n;
+    }
+
+    /**
+     * Fold $loser into $survivor: repoint all child rows, drop rebuilt-on-
+     * finalize artifacts, and delete the loser identity. The survivor inherits
+     * the loser's null deterministic keys so later passes can chain matches.
+     *
+     * Row-locked in a transaction so concurrent dedup shards that happen to
+     * touch the same survivor/loser serialize instead of corrupting each other;
+     * if another shard already merged one of them away, this is a no-op.
+     *
+     * @return int 1 if a merge happened, 0 otherwise
+     */
+    private function mergeIdentity(int $survivor, int $loser): int
+    {
+        if ($survivor === $loser) {
+            return 0;
+        }
+
+        return $this->hub()->transaction(function () use ($survivor, $loser) {
+            $hub = $this->hub();
+            // Lock both rows in a stable order to avoid deadlocks between shards.
+            [$lo, $hi] = $survivor < $loser ? [$survivor, $loser] : [$loser, $survivor];
+            $hub->table('gp_identity')->whereIn('identity_id', [$lo, $hi])
+                ->orderBy('identity_id')->lockForUpdate()->get();
+
+            $s = $hub->table('gp_identity')->where('identity_id', $survivor)->first();
+            $l = $hub->table('gp_identity')->where('identity_id', $loser)->first();
+            if (! $s || ! $l) {
+                return 0;
+            }
+            $this->applyMerge($hub, $s, $l, $survivor, $loser);
+
+            return 1;
+        });
+    }
+
+    /** The row-moving half of a merge (runs inside mergeIdentity's transaction). */
+    private function applyMerge($hub, $s, $l, int $survivor, int $loser): void
+    {
+        $upd = [];
+        foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob',
+            'canonical_first', 'canonical_last', 'canonical_middle'] as $c) {
+            if (empty($s->$c) && ! empty($l->$c)) {
+                $upd[$c] = $l->$c;
+            }
+        }
+        if ($upd) {
+            $hub->table('gp_identity')->where('identity_id', $survivor)->update($upd);
+        }
+
+        // Repoint children whose unique key does NOT include identity_id.
+        foreach (['gp_source_link', 'gp_edge', 'gp_identity_credential', 'gp_identity_exclusion',
+            'gp_identity_resolution', 'gp_resolution_log', 'gp_board_action'] as $t) {
+            $hub->table($t)->where('identity_id', $loser)->update(['identity_id' => $survivor]);
+        }
+
+        // Collision-prone (unique key includes identity_id): drop loser rows that
+        // would clash with an existing survivor row, repoint the rest.
+        $this->repointDeduped('gp_license', 'license_id', $survivor, $loser,
+            ['license_number', 'certification_state', 'certification_board']);
+        $this->repointDeduped('gp_address', 'address_id', $survivor, $loser,
+            ['address1', 'city', 'state', 'zip']);
+
+        // Rebuilt from scratch by finalize — just remove the loser's copies.
+        foreach (['gp_attribute', 'gp_survivorship_audit', 'gp_identity_profile'] as $t) {
+            $hub->table($t)->where('identity_id', $loser)->delete();
+        }
+
+        $hub->table('gp_identity')->where('identity_id', $loser)->delete();
+    }
+
+    private function repointDeduped(string $table, string $pk, int $survivor, int $loser, array $natKey): void
+    {
+        $hub = $this->hub();
+        foreach ($hub->table($table)->where('identity_id', $loser)->get() as $row) {
+            $exists = $hub->table($table)->where('identity_id', $survivor);
+            foreach ($natKey as $k) {
+                $exists = $row->$k === null ? $exists->whereNull($k) : $exists->where($k, $row->$k);
+            }
+            if ($exists->exists()) {
+                $hub->table($table)->where($pk, $row->$pk)->delete();
+            } else {
+                $hub->table($table)->where($pk, $row->$pk)->update(['identity_id' => $survivor]);
+            }
+        }
     }
 
     /** Mode 2 — incremental: only employees changed since the watermark. */
@@ -115,10 +450,11 @@ class Engine
             $q->where('date_modified', '>', $water);
         }
         $q->chunkById($chunk, function ($rows) use (&$count, &$maxModified, $progress) {
+            $accountMap = $this->accountMapFor($rows);
             $identityIds = [];
             $empIds = [];
             foreach ($rows as $emp) {
-                $stgId = $this->connector->ingest($emp);
+                $stgId = $this->connector->ingest($emp, $accountMap);
                 $identityIds[$this->resolver->resolve($stgId)] = true;
                 $empIds[] = $emp->id;
                 if ($emp->date_modified && $emp->date_modified > $maxModified) {
@@ -141,6 +477,52 @@ class Engine
         return $count;
     }
 
+    /**
+     * One source query per chunk: map employeelist_id => account_id for every
+     * employeelist referenced in this batch of rows. Avoids a per-row source
+     * round-trip (the source is a high-latency WAN connection).
+     *
+     * @return array<int,int|null>
+     */
+    private function accountMapFor($rows): array
+    {
+        $listIds = [];
+        foreach ($rows as $emp) {
+            if ($emp->employeelist_id) {
+                $listIds[$emp->employeelist_id] = true;
+            }
+        }
+        if (! $listIds) {
+            return [];
+        }
+
+        return $this->src()->table('employeelists')
+            ->whereIn('id', array_keys($listIds))
+            ->pluck('account_id', 'id')
+            ->all();
+    }
+
+    /**
+     * One hub query per chunk: source employee_id => identity_id, so the
+     * rollups don't do a per-credential/per-match identity lookup.
+     *
+     * @return array<int,int>
+     */
+    private function identityMapFor(array $employeeIds): array
+    {
+        if (! $employeeIds) {
+            return [];
+        }
+
+        return $this->hub()->table('gp_source_link')
+            ->where('system_id', $this->systemId)
+            ->where('source_table', self::SOURCE_TABLE)
+            ->whereIn('source_id', $employeeIds)
+            ->pluck('identity_id', 'source_id')
+            ->map(fn ($v) => (int) $v)
+            ->all();
+    }
+
     /** credential_matches -> gp_identity_credential (confirmed links). */
     private function rollupCredentials(array $employeeIds): void
     {
@@ -149,31 +531,47 @@ class Engine
         }
         $excludeCodes = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
         $rows = $this->src()->table('credential_matches')->whereIn('employee_id', $employeeIds)->get();
+        $identityMap = $this->identityMapFor($employeeIds);
+
+        $upserts = [];
+        $deleteIds = [];
         foreach ($rows as $c) {
-            $identityId = $this->identityForSource((int) $c->employee_id);
+            $identityId = $identityMap[(int) $c->employee_id] ?? null;
             if (! $identityId) {
                 continue;
             }
             // Pending / Error matches are not part of the golden data — never roll them up.
             if (in_array((int) $c->match_summary_status_code, $excludeCodes, true)) {
-                $this->hub()->table('gp_identity_credential')
-                    ->where(['system_id' => $this->systemId, 'credential_match_id' => $c->id])->delete();
+                $deleteIds[] = (int) $c->id;
 
                 continue;
             }
-            $this->hub()->table('gp_identity_credential')->updateOrInsert(
-                ['system_id' => $this->systemId, 'credential_match_id' => $c->id],
-                [
-                    'identity_id' => $identityId,
-                    'registry' => $c->registry,
-                    'match_summary_status' => $c->match_summary_status,
-                    'match_summary_status_code' => $c->match_summary_status_code,
-                    'match_is_valid' => $c->match_is_valid,
-                    'current' => $c->current,
-                    'date_resolved' => $this->dt($c->date_resolved),
-                    'link_state' => 'confirmed',
-                ],
+            $upserts[] = [
+                'system_id' => $this->systemId,
+                'credential_match_id' => (int) $c->id,
+                'identity_id' => $identityId,
+                'registry' => $c->registry,
+                'match_summary_status' => $c->match_summary_status,
+                'match_summary_status_code' => $c->match_summary_status_code,
+                'match_is_valid' => $c->match_is_valid,
+                'current' => $c->current,
+                'date_resolved' => $this->dt($c->date_resolved),
+                'link_state' => 'confirmed',
+            ];
+        }
+
+        foreach (array_chunk($upserts, 500) as $batch) {
+            $this->hub()->table('gp_identity_credential')->upsert(
+                $batch,
+                ['system_id', 'credential_match_id'],
+                ['identity_id', 'registry', 'match_summary_status', 'match_summary_status_code',
+                    'match_is_valid', 'current', 'date_resolved', 'link_state'],
             );
+        }
+        foreach (array_chunk($deleteIds, 1000) as $batch) {
+            $this->hub()->table('gp_identity_credential')
+                ->where('system_id', $this->systemId)
+                ->whereIn('credential_match_id', $batch)->delete();
         }
     }
 
@@ -184,29 +582,48 @@ class Engine
             return;
         }
         $rows = $this->src()->table('matches')->whereIn('employee_id', $employeeIds)->get();
+
+        // Batch the exclusion_records lookup: one source query for the whole
+        // chunk instead of one per match (source is a high-latency WAN link).
+        $recordIds = $rows->pluck('exclusion_record_id')->filter()->unique()->all();
+        $registryMap = $recordIds
+            ? $this->src()->table('exclusion_records')
+                ->whereIn('id', $recordIds)
+                ->pluck('exclusion_list_prefix', 'id')->all()
+            : [];
+
+        $identityMap = $this->identityMapFor($employeeIds);
+
+        $upserts = [];
         foreach ($rows as $m) {
-            $identityId = $this->identityForSource((int) $m->employee_id);
+            $identityId = $identityMap[(int) $m->employee_id] ?? null;
             if (! $identityId) {
                 continue;
             }
-            $registry = null;
-            if ($m->exclusion_record_id) {
-                $registry = $this->src()->table('exclusion_records')
-                    ->where('id', $m->exclusion_record_id)->value('exclusion_list_prefix');
-            }
-            $this->hub()->table('gp_identity_exclusion')->updateOrInsert(
-                ['system_id' => $this->systemId, 'match_id' => $m->id],
-                [
-                    'identity_id' => $identityId,
-                    'exclusion_record_id' => $m->exclusion_record_id,
-                    'registry' => $registry,
-                    'is_ssn_match' => $m->is_ssn_match,
-                    'is_npi_match' => $m->is_npi_match,
-                    'is_canonical_name_match' => $m->is_canonical_name_match,
-                    'is_upin_match' => $m->is_upin_match,
-                    'is_license_number_match' => $m->is_license_number_match,
-                    'link_state' => 'candidate',
-                ],
+            $registry = $m->exclusion_record_id
+                ? ($registryMap[$m->exclusion_record_id] ?? null)
+                : null;
+            $upserts[] = [
+                'system_id' => $this->systemId,
+                'match_id' => (int) $m->id,
+                'identity_id' => $identityId,
+                'exclusion_record_id' => $m->exclusion_record_id,
+                'registry' => $registry,
+                'is_ssn_match' => $m->is_ssn_match,
+                'is_npi_match' => $m->is_npi_match,
+                'is_canonical_name_match' => $m->is_canonical_name_match,
+                'is_upin_match' => $m->is_upin_match,
+                'is_license_number_match' => $m->is_license_number_match,
+                'link_state' => 'candidate',
+            ];
+        }
+
+        foreach (array_chunk($upserts, 500) as $batch) {
+            $this->hub()->table('gp_identity_exclusion')->upsert(
+                $batch,
+                ['system_id', 'match_id'],
+                ['identity_id', 'exclusion_record_id', 'registry', 'is_ssn_match', 'is_npi_match',
+                    'is_canonical_name_match', 'is_upin_match', 'is_license_number_match', 'link_state'],
             );
         }
     }
