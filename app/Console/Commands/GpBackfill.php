@@ -15,7 +15,9 @@ class GpBackfill extends Command
         {--to-id= : Stop at this source id (inclusive) — for a bounded / sanity run}
         {--chunk=5000 : Staging read/insert batch size}
         {--workers=16 : Parallel degree for the staging and finalize phases}
+        {--restart : Clear staging checkpoints and stage from the beginning}
         {--stage-only : Internal: run only the stage phase for the given range}
+        {--segment= : Internal: staging checkpoint key for this stripe}
         {--finalize-shard= : Internal: run only the finalize phase for this shard}
         {--shards= : Internal: total shards for --finalize-shard}';
 
@@ -25,7 +27,10 @@ class GpBackfill extends Command
     {
         // --- internal sub-worker modes (spawned by the orchestrator) ---
         if ($this->option('stage-only')) {
-            (new SqlBackfill)->stage($this->intOpt('from-id'), $this->intOpt('to-id'), (int) $this->option('chunk'));
+            (new SqlBackfill)->stage(
+                $this->intOpt('from-id'), $this->intOpt('to-id'), (int) $this->option('chunk'),
+                null, (string) ($this->option('segment') ?? 'default'),
+            );
 
             return self::SUCCESS;
         }
@@ -40,6 +45,11 @@ class GpBackfill extends Command
         $workers = max(1, min(32, (int) $this->option('workers')));
         [$from, $to] = $this->resolveRange();
 
+        if ($this->option('restart')) {
+            (new SqlBackfill)->clearStageCursors();
+            $this->line('  [restart] cleared staging checkpoints');
+        }
+
         $this->info("Backfilling {$this->argument('system')} ids $from..$to — $workers-way stage/finalize");
 
         // #2: parallel staging over disjoint id partitions.
@@ -52,9 +62,9 @@ class GpBackfill extends Command
             if ($f > $to) {
                 break;
             }
-            $stageCmds[] = "--stage-only --from-id=$f --to-id=$t --chunk=$chunk";
+            $stageCmds[] = "--stage-only --segment=$i --from-id=$f --to-id=$t --chunk=$chunk";
         }
-        $this->line('  [stage] '.count($stageCmds).' parallel partitions...');
+        $this->line('  [stage] '.count($stageCmds).' parallel partitions (resumable)...');
         $this->runParallel($stageCmds);
 
         // Transform once in this process (bulk set-based, not parallel).

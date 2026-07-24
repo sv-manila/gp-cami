@@ -99,10 +99,22 @@ class SqlBackfill
 
     // ---- 1. STAGE ---------------------------------------------------------
 
-    /** Bulk-copy source rows into hub staging + mirror source tables. Returns rows staged. */
-    public function stage(?int $fromId, ?int $toId, int $chunk, ?callable $log = null): int
+    /**
+     * Bulk-copy source rows into hub staging + mirror source tables. Returns rows staged.
+     *
+     * Resumable: after each chunk the max source id staged is checkpointed in
+     * gp_watermark under this $segment. A stopped run re-invoked with the same
+     * range/segment picks up just past the checkpoint instead of re-reading
+     * everything from the source. Staging writes are idempotent (insertOrIgnore),
+     * so re-covering the final in-flight chunk on resume is harmless.
+     */
+    public function stage(?int $fromId, ?int $toId, int $chunk, ?callable $log = null, string $segment = 'default'): int
     {
         $count = 0;
+        $cursor = $this->stageCursor($segment);
+        if ($cursor !== null) {
+            $fromId = max((int) $fromId, $cursor + 1);
+        }
         $q = $this->src()->table(self::SOURCE_TABLE)->orderBy('id');
         if ($fromId) {
             $q->where('id', '>=', $fromId);
@@ -110,7 +122,7 @@ class SqlBackfill
         if ($toId) {
             $q->where('id', '<=', $toId);
         }
-        $q->chunkById($chunk, function ($rows) use (&$count, $log) {
+        $q->chunkById($chunk, function ($rows) use (&$count, $log, $segment) {
             $accountMap = $this->accountMapFor($rows);
 
             // stg_person (bulk). insertOrIgnore keeps it idempotent on re-run.
@@ -174,13 +186,48 @@ class SqlBackfill
 
             $this->mirrorSource($rows->pluck('id')->all());
 
+            // Checkpoint this stripe (rows ordered by id -> last = max staged).
+            $this->setStageCursor((int) $rows->last()->id, $segment);
             $count += $rows->count();
             if ($log) {
-                $log('stage', "staged $count");
+                $log('stage', "staged $count [$segment]");
             }
         }, 'id');
 
         return $count;
+    }
+
+    // ---- staging resume cursors (per stripe, in gp_watermark) -------------
+
+    private function stageKey(string $segment): string
+    {
+        return 'stg:'.$segment;
+    }
+
+    public function stageCursor(string $segment = 'default'): ?int
+    {
+        $v = $this->hub()->table('gp_watermark')
+            ->where(['system_id' => $this->systemId, 'source_table' => $this->stageKey($segment)])
+            ->value('high_water');
+
+        return $v !== null ? (int) $v : null;
+    }
+
+    private function setStageCursor(int $id, string $segment): void
+    {
+        $this->hub()->table('gp_watermark')->updateOrInsert(
+            ['system_id' => $this->systemId, 'source_table' => $this->stageKey($segment)],
+            ['high_water' => (string) $id, 'updated_at' => now()],
+        );
+    }
+
+    /** Drop all staging cursors — forces a fresh stage on the next run. */
+    public function clearStageCursors(): void
+    {
+        $this->hub()->table('gp_watermark')
+            ->where('system_id', $this->systemId)
+            ->where('source_table', 'like', 'stg:%')
+            ->delete();
     }
 
     private function accountMapFor($rows): array
