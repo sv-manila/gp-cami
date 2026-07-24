@@ -68,19 +68,30 @@ class SqlBackfill
     {
         $log ??= fn ($p, $d) => null;
         $staged = $this->stage($opts['fromId'] ?? null, $opts['toId'] ?? null, $opts['chunk'] ?? 5000, $log);
+        $this->transform($log);
+        $log('finalize', 'survivorship + materialize');
+        (new Engine)->finalizeAll();
+
+        return $this->counts() + ['staged' => $staged];
+    }
+
+    /** Post-staging transform: resolve → enrich → dedup → rollup (single process). */
+    public function transform(?callable $log = null): void
+    {
+        $log ??= fn ($p, $d) => null;
         $log('resolve', 'deterministic tiers');
         $this->resolveDeterministic();
-        $log('enrich', 'licenses + addresses');
+        $log('enrich', 'licenses + addresses + identifiers');
         $this->enrich();
         $log('dedup', 'merge duplicate identities');
         (new Engine)->dedup();
         $log('rollup', 'credentials + exclusions');
         $this->rollup();
-        $log('finalize', 'survivorship + materialize');
-        (new Engine)->finalizeAll();
+    }
 
+    public function counts(): array
+    {
         return [
-            'staged' => $staged,
             'identities' => (int) $this->hub()->table('gp_identity')->count(),
             'links' => (int) $this->hub()->table('gp_source_link')->count(),
         ];
@@ -107,7 +118,7 @@ class SqlBackfill
             foreach ($rows as $emp) {
                 $persons[] = $this->connector->personRow($emp, $accountMap);
             }
-            $this->hub()->table('stg_person')->insertOrIgnore($persons);
+            $this->bulkInsert('stg_person', $persons);
 
             // resolve source_id -> stg_person_id for this chunk, attach children.
             $ids = $this->hub()->table('stg_person')
@@ -152,10 +163,14 @@ class SqlBackfill
                     }
                 }
             }
-            $this->bulkInsert('stg_person_alias', $aliases);
-            $this->bulkInsert('stg_person_address', $addresses);
-            $this->bulkInsert('stg_person_license', $licenses);
-            $this->bulkInsert('stg_person_identifier', $identifiers);
+            // #6: one transaction per chunk for the child writes — a single
+            // commit/flush instead of one per insert batch.
+            $this->hub()->transaction(function () use ($aliases, $addresses, $licenses, $identifiers) {
+                $this->bulkInsert('stg_person_alias', $aliases);
+                $this->bulkInsert('stg_person_address', $addresses);
+                $this->bulkInsert('stg_person_license', $licenses);
+                $this->bulkInsert('stg_person_identifier', $identifiers);
+            });
 
             $this->mirrorSource($rows->pluck('id')->all());
 
@@ -191,7 +206,13 @@ class SqlBackfill
      */
     private function mirrorSource(array $employeeIds): void
     {
-        $this->src()->table('credential_matches')->whereIn('employee_id', $employeeIds)->orderBy('id')
+        // #3: filter excluded status codes at the SOURCE so pending/error/invalid
+        // credential rows never cross the wire (they're dropped at rollup anyway).
+        $excludeCodes = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
+
+        $this->src()->table('credential_matches')->whereIn('employee_id', $employeeIds)
+            ->when($excludeCodes, fn ($q) => $q->whereNotIn('match_summary_status_code', $excludeCodes))
+            ->orderBy('id')
             ->chunk(2000, function ($creds) {
                 $this->bulkInsert('src_credential_match', $creds->map(fn ($c) => [
                     'id' => $c->id, 'employee_id' => $c->employee_id, 'registry' => $c->registry,
@@ -478,10 +499,15 @@ class SqlBackfill
 
     private function bulkInsert(string $table, array $rows): void
     {
-        foreach (array_chunk($rows, 1000) as $batch) {
-            if ($batch) {
-                $this->hub()->table($table)->insertOrIgnore($batch);
-            }
+        if (! $rows) {
+            return;
+        }
+        // #6: largest multi-row insert that stays under MySQL's 65535-placeholder
+        // limit — batch size scales to the row's column count.
+        $cols = max(1, count((array) reset($rows)));
+        $per = max(1, intdiv(60000, $cols));
+        foreach (array_chunk($rows, $per) as $batch) {
+            $this->hub()->table($table)->insertOrIgnore($batch);
         }
     }
 
