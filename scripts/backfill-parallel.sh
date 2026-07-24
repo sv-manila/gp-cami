@@ -25,7 +25,14 @@
 #
 set -euo pipefail
 
-WORKERS="${1:-20}"
+# Default 24: the shortest-duration worker count is bounded by the SHARED hub's
+# connection pool (MySQL max_connections, minus what other apps already use),
+# not by adding processes. Each load worker holds ~1 hub connection; past the
+# knee, more workers only contend for the same hub CPU/link without shortening
+# wall-time (measured: 16 workers already saturated a remote link at ~15 rows/s).
+# 24 ≈ 2× a typical core count and fits comfortably under the hub's headroom.
+# The script auto-caps this to the hub's real free connections at runtime.
+WORKERS="${1:-24}"
 FINALIZE_SHARDS="${2:-$WORKERS}"
 CHUNK="${3:-1000}"
 MAX_ID_OVERRIDE="${4:-}"
@@ -39,6 +46,23 @@ if [[ -n "$MAX_ID_OVERRIDE" ]]; then
   echo "   SANITY MODE — capping id range at $MAX"
 fi
 echo "   employees id range: $MIN .. $MAX"
+
+# Auto-cap workers to the shortest-duration ceiling: whichever is smaller of
+# the hub's free connection headroom (leaving 20 for other apps on the shared
+# box) and 2x local CPU cores. Beyond this, wall-time doesn't improve.
+echo ">> sizing workers to hub headroom..."
+read -r MAXCONN USEDCONN <<<"$(php artisan tinker --execute="\$h=DB::connection('golden_profile'); echo \$h->select('SHOW VARIABLES LIKE \"max_connections\"')[0]->Value.' '.\$h->select('SHOW STATUS LIKE \"Threads_connected\"')[0]->Value;" | tail -1)"
+CORES="$(nproc 2>/dev/null || echo 8)"
+CONN_CAP=$(( MAXCONN - USEDCONN - 20 ))
+(( CONN_CAP < 1 )) && CONN_CAP=1
+CPU_CAP=$(( CORES * 2 ))
+MAXW=$CONN_CAP; (( CPU_CAP < MAXW )) && MAXW=$CPU_CAP
+echo "   hub max_connections=$MAXCONN in_use=$USEDCONN -> conn_cap=$CONN_CAP | cores=$CORES -> cpu_cap=$CPU_CAP | max_useful=$MAXW"
+if (( WORKERS > MAXW )); then
+  echo "   capping workers $WORKERS -> $MAXW (shortest duration; more would only add contention)"
+  WORKERS=$MAXW
+fi
+(( FINALIZE_SHARDS > MAXW )) && FINALIZE_SHARDS=$MAXW
 
 SPAN=$(( MAX - MIN + 1 ))
 STRIDE=$(( (SPAN + WORKERS - 1) / WORKERS ))
