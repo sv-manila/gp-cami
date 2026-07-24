@@ -248,8 +248,10 @@ class SqlBackfill
 
     /**
      * Mirror credential_matches / matches / exclusion_records for these
-     * employees. Streamed in sub-batches — a chunk of employees can have tens
-     * of thousands of credential rows, too many to hold in memory at once.
+     * employees. Read in small employee sub-batches with a plain indexed
+     * whereIn(employee_id) — NO orderBy/offset paging, which on the ~600M-row
+     * credential_matches forces a PK scan (80s+ per query). Column-pruned so
+     * only needed fields cross the wire.
      */
     private function mirrorSource(array $employeeIds): void
     {
@@ -257,35 +259,37 @@ class SqlBackfill
         // credential rows never cross the wire (they're dropped at rollup anyway).
         $excludeCodes = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
 
-        $this->src()->table('credential_matches')->whereIn('employee_id', $employeeIds)
-            ->when($excludeCodes, fn ($q) => $q->whereNotIn('match_summary_status_code', $excludeCodes))
-            ->orderBy('id')
-            ->chunk(2000, function ($creds) {
-                $this->bulkInsert('src_credential_match', $creds->map(fn ($c) => [
-                    'id' => $c->id, 'employee_id' => $c->employee_id, 'registry' => $c->registry,
-                    'match_summary_status' => $c->match_summary_status,
-                    'match_summary_status_code' => $c->match_summary_status_code,
-                    'match_is_valid' => $c->match_is_valid, 'current' => $c->current,
-                    'date_resolved' => $this->cleanDate($c->date_resolved),
-                ])->all());
-            });
-
         $recordIds = [];
-        $this->src()->table('matches')->whereIn('employee_id', $employeeIds)->orderBy('id')
-            ->chunk(2000, function ($matches) use (&$recordIds) {
-                $this->bulkInsert('src_match', $matches->map(fn ($m) => [
-                    'id' => $m->id, 'employee_id' => $m->employee_id, 'exclusion_record_id' => $m->exclusion_record_id,
-                    'is_ssn_match' => $m->is_ssn_match, 'is_npi_match' => $m->is_npi_match,
-                    'is_canonical_name_match' => $m->is_canonical_name_match, 'is_upin_match' => $m->is_upin_match,
-                    'is_license_number_match' => $m->is_license_number_match,
-                ])->all());
-                foreach ($matches->pluck('exclusion_record_id')->filter()->unique() as $rid) {
-                    $recordIds[$rid] = true;
-                }
-            });
+        foreach (array_chunk($employeeIds, 500) as $empBatch) {
+            $creds = $this->src()->table('credential_matches')->whereIn('employee_id', $empBatch)
+                ->when($excludeCodes, fn ($q) => $q->whereNotIn('match_summary_status_code', $excludeCodes))
+                ->get(['id', 'employee_id', 'registry', 'match_summary_status',
+                    'match_summary_status_code', 'match_is_valid', 'current', 'date_resolved']);
+            $this->bulkInsert('src_credential_match', $creds->map(fn ($c) => [
+                'id' => $c->id, 'employee_id' => $c->employee_id, 'registry' => $c->registry,
+                'match_summary_status' => $c->match_summary_status,
+                'match_summary_status_code' => $c->match_summary_status_code,
+                'match_is_valid' => $c->match_is_valid, 'current' => $c->current,
+                'date_resolved' => $this->cleanDate($c->date_resolved),
+            ])->all());
 
-        foreach (array_chunk(array_keys($recordIds), 2000) as $ridBatch) {
-            $recs = $this->src()->table('exclusion_records')->whereIn('id', $ridBatch)->get();
+            $matches = $this->src()->table('matches')->whereIn('employee_id', $empBatch)
+                ->get(['id', 'employee_id', 'exclusion_record_id', 'is_ssn_match', 'is_npi_match',
+                    'is_canonical_name_match', 'is_upin_match', 'is_license_number_match']);
+            $this->bulkInsert('src_match', $matches->map(fn ($m) => [
+                'id' => $m->id, 'employee_id' => $m->employee_id, 'exclusion_record_id' => $m->exclusion_record_id,
+                'is_ssn_match' => $m->is_ssn_match, 'is_npi_match' => $m->is_npi_match,
+                'is_canonical_name_match' => $m->is_canonical_name_match, 'is_upin_match' => $m->is_upin_match,
+                'is_license_number_match' => $m->is_license_number_match,
+            ])->all());
+            foreach ($matches->pluck('exclusion_record_id')->filter()->unique() as $rid) {
+                $recordIds[$rid] = true;
+            }
+        }
+
+        foreach (array_chunk(array_keys($recordIds), 500) as $ridBatch) {
+            $recs = $this->src()->table('exclusion_records')->whereIn('id', $ridBatch)
+                ->get(['id', 'exclusion_list_prefix']);
             $this->bulkInsert('src_exclusion_record', $recs->map(fn ($r) => [
                 'id' => $r->id, 'exclusion_list_prefix' => $r->exclusion_list_prefix,
             ])->all());
