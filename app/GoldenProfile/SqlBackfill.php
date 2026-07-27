@@ -52,10 +52,12 @@ class SqlBackfill
     private function ensureSystem(): int
     {
         $hub = DB::connection('golden_profile');
-        $hub->table('gp_source_system')->updateOrInsert(
-            ['system_code' => self::SYSTEM_CODE],
-            ['display_name' => 'StreamlineVerify local', 'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now()],
-        );
+        // insertOrIgnore is atomic — parallel workers constructing this class
+        // concurrently won't collide on the system_code unique key.
+        $hub->table('gp_source_system')->insertOrIgnore([
+            'system_code' => self::SYSTEM_CODE, 'display_name' => 'StreamlineVerify local',
+            'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now(),
+        ]);
 
         return (int) $hub->table('gp_source_system')->where('system_code', self::SYSTEM_CODE)->value('system_id');
     }
@@ -75,10 +77,41 @@ class SqlBackfill
         return $this->counts() + ['staged' => $staged];
     }
 
+    /**
+     * Add indexes on the staged tier-key columns. Run ONCE after staging and
+     * before transform: staging inserts stay fast (no index maintenance during
+     * bulk load), while the resolve tiers' GROUP BY / NOT EXISTS become index
+     * lookups instead of full scans over millions of rows.
+     */
+    public function indexStaging(?callable $log = null): void
+    {
+        $indexes = [
+            'stg_ssn' => 'ssn_hash',
+            'stg_npi' => 'npi',
+            'stg_upin' => 'upin',
+            'stg_dea' => 'dea_number',
+            'stg_namedob' => 'last_name, first_name, date_of_birth',
+        ];
+        foreach ($indexes as $name => $cols) {
+            $exists = $this->hub()->selectOne(
+                'SELECT 1 FROM information_schema.statistics
+                 WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1',
+                ['stg_person', $name],
+            );
+            if (! $exists) {
+                if ($log) {
+                    $log('index', "stg_person($cols)");
+                }
+                $this->hub()->statement("ALTER TABLE stg_person ADD INDEX `$name` ($cols)");
+            }
+        }
+    }
+
     /** Post-staging transform: resolve → enrich → dedup → rollup (single process). */
     public function transform(?callable $log = null): void
     {
         $log ??= fn ($p, $d) => null;
+        $this->indexStaging($log);
         $log('resolve', 'deterministic tiers');
         $this->resolveDeterministic();
         $log('enrich', 'licenses + addresses + identifiers');

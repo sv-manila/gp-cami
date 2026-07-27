@@ -60,10 +60,12 @@ class Engine
     private function ensureSystem(): int
     {
         $hub = DB::connection('golden_profile');
-        $hub->table('gp_source_system')->updateOrInsert(
-            ['system_code' => self::SYSTEM_CODE],
-            ['display_name' => 'StreamlineVerify local', 'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now()],
-        );
+        // insertOrIgnore is atomic — parallel finalize shards constructing this
+        // class concurrently won't collide on the system_code unique key.
+        $hub->table('gp_source_system')->insertOrIgnore([
+            'system_code' => self::SYSTEM_CODE, 'display_name' => 'StreamlineVerify local',
+            'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now(),
+        ]);
 
         return (int) $hub->table('gp_source_system')->where('system_code', self::SYSTEM_CODE)->value('system_id');
     }

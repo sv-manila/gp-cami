@@ -65,7 +65,12 @@ class GpBackfill extends Command
             $stageCmds[] = "--stage-only --segment=$i --from-id=$f --to-id=$t --chunk=$chunk";
         }
         $this->line('  [stage] '.count($stageCmds).' parallel partitions (resumable)...');
-        $this->runParallel($stageCmds);
+        if (! $this->runParallel($stageCmds)) {
+            $this->error('Staging did not finish (a worker failed/died). Nothing transformed — '
+                .'re-run `php artisan gp:backfill` to resume staging from the checkpoints, then it will transform.');
+
+            return self::FAILURE;
+        }
 
         // Transform once in this process (bulk set-based, not parallel).
         (new SqlBackfill)->transform(fn ($p, $d) => $this->line("  [$p] $d"));
@@ -103,8 +108,12 @@ class GpBackfill extends Command
         return [$from, $to];
     }
 
-    /** Run `gp:backfill <args>` sub-processes concurrently and wait for all. */
-    private function runParallel(array $argSets): void
+    /**
+     * Run `gp:backfill <args>` sub-processes concurrently and wait for all.
+     * Returns false if any worker exited non-zero — the caller must NOT proceed
+     * to a phase that assumes the workers completed (e.g. transform after stage).
+     */
+    private function runParallel(array $argSets): bool
     {
         $procs = [];
         foreach ($argSets as $args) {
@@ -118,11 +127,15 @@ class GpBackfill extends Command
             $p->start();
             $procs[] = $p;
         }
+        $ok = true;
         foreach ($procs as $p) {
             $p->wait();
             if (! $p->isSuccessful()) {
+                $ok = false;
                 $this->warn('  worker failed: '.trim($p->getErrorOutput() ?: $p->getOutput()));
             }
         }
+
+        return $ok;
     }
 }
