@@ -94,8 +94,6 @@
   <div class="topbar"><div class="wrap">
     <div class="brand">gp&#8209;<b>cami</b></div>
     <nav class="topnav">
-      <a href="/features">Features</a>
-      <a href="/docs">API Docs</a>
       <a href="/search" class="active">Identity Search</a>
     </nav>
   </div></div>
@@ -154,7 +152,7 @@
       </table>
     @endif
 
-    <footer>gp-cami · Golden Profile · served from <code>gp_identity_profile</code> · <a href="/docs">API Docs →</a></footer>
+    <footer>gp-cami · Golden Profile · served from <code>gp_identity_profile</code></footer>
   </div>
   <div id="idModal" role="dialog" aria-modal="true">
     <div class="panel">

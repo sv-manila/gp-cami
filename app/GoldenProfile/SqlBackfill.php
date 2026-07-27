@@ -432,10 +432,13 @@ class SqlBackfill
              JOIN (
                  SELECT MIN(s.stg_person_id) mid
                  FROM stg_person s
+                 LEFT JOIN gp_source_link l
+                   ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
+                 LEFT JOIN (SELECT `$col` k FROM gp_identity WHERE status='active' AND `$col` IS NOT NULL GROUP BY `$col`) gi
+                   ON gi.k = s.`$col`
                  WHERE s.system_id = ? AND s.`$col` IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM gp_source_link l
-                        WHERE l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id)
-                   AND NOT EXISTS (SELECT 1 FROM gp_identity i WHERE i.`$col`=s.`$col` AND i.status='active')
+                   AND l.link_id IS NULL     -- not yet linked (anti-join)
+                   AND gi.k IS NULL          -- no active identity has this key yet (anti-join)
                  GROUP BY s.`$col`
              ) f ON f.mid = r.stg_person_id",
             [$this->systemId]
@@ -474,12 +477,16 @@ class SqlBackfill
              JOIN (
                  SELECT MIN(s.stg_person_id) mid
                  FROM stg_person s
+                 LEFT JOIN gp_source_link l
+                   ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
+                 LEFT JOIN (SELECT LOWER(canonical_last) l, LOWER(canonical_first) f, canonical_dob d
+                            FROM gp_identity WHERE status='active'
+                              AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
+                            GROUP BY LOWER(canonical_last), LOWER(canonical_first), canonical_dob) gi
+                   ON gi.l=LOWER(s.last_name) AND gi.f=LOWER(s.first_name) AND gi.d=s.date_of_birth
                  WHERE s.system_id = ? AND s.last_name IS NOT NULL AND s.first_name IS NOT NULL AND s.date_of_birth IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM gp_source_link l
-                        WHERE l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id)
-                   AND NOT EXISTS (SELECT 1 FROM gp_identity i WHERE i.status='active'
-                        AND LOWER(i.canonical_last)=LOWER(s.last_name) AND LOWER(i.canonical_first)=LOWER(s.first_name)
-                        AND i.canonical_dob=s.date_of_birth)
+                   AND l.link_id IS NULL     -- not yet linked (anti-join)
+                   AND gi.l IS NULL          -- no active identity with this name+dob yet (anti-join)
                  GROUP BY LOWER(s.last_name), LOWER(s.first_name), s.date_of_birth
              ) f ON f.mid = r.stg_person_id",
             [$this->systemId]
@@ -510,6 +517,14 @@ class SqlBackfill
      */
     private function residualCreateAndLink(): void
     {
+        // This is the single biggest insert — one identity per still-unlinked
+        // staged row (potentially millions). Drop gp_identity's key indexes for
+        // the duration so the bulk insert doesn't maintain 5 secondary indexes
+        // per row; the earlier key tiers already finished (they needed them),
+        // and dedup (which needs them) runs after, so we rebuild before returning.
+        $this->dropIdentityKeyIndexes();
+
+        // Anti-join (LEFT JOIN … link_id IS NULL) instead of a correlated NOT EXISTS.
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
@@ -517,9 +532,9 @@ class SqlBackfill
              SELECT UUID(), s.first_name, s.middle_name, s.last_name, s.date_of_birth,
                  s.ssn_hash, s.npi, s.upin, s.dea_number, 1.0, 0, 'active', s.stg_person_id, NOW(), NOW()
              FROM stg_person s
-             WHERE s.system_id = ?
-               AND NOT EXISTS (SELECT 1 FROM gp_source_link l
-                    WHERE l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id)",
+             LEFT JOIN gp_source_link l
+               ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
+             WHERE s.system_id = ? AND l.link_id IS NULL",
             [$this->systemId]
         );
 
@@ -536,6 +551,45 @@ class SqlBackfill
         );
 
         $this->hub()->statement("UPDATE gp_identity SET merged_into = NULL WHERE merged_into IS NOT NULL", []);
+
+        // Rebuild the key indexes for dedup + finalize.
+        $this->addIdentityKeyIndexes();
+    }
+
+    /** gp_identity key indexes, dropped during the residual bulk insert and rebuilt after. */
+    private const IDENTITY_KEY_INDEXES = [
+        'idx_ssn' => 'ssn_hash',
+        'idx_npi' => 'npi',
+        'idx_upin' => 'upin',
+        'idx_dea' => 'dea_number',
+        'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob',
+    ];
+
+    private function dropIdentityKeyIndexes(): void
+    {
+        foreach (array_keys(self::IDENTITY_KEY_INDEXES) as $name) {
+            if ($this->indexExists('gp_identity', $name)) {
+                $this->hub()->statement("ALTER TABLE gp_identity DROP INDEX `$name`");
+            }
+        }
+    }
+
+    private function addIdentityKeyIndexes(): void
+    {
+        foreach (self::IDENTITY_KEY_INDEXES as $name => $cols) {
+            if (! $this->indexExists('gp_identity', $name)) {
+                $this->hub()->statement("ALTER TABLE gp_identity ADD INDEX `$name` ($cols)");
+            }
+        }
+    }
+
+    private function indexExists(string $table, string $index): bool
+    {
+        return (bool) $this->hub()->selectOne(
+            'SELECT 1 FROM information_schema.statistics
+             WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1',
+            [$table, $index],
+        );
     }
 
     // ---- 3. ROLLUP (set-based) --------------------------------------------

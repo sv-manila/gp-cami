@@ -13,7 +13,7 @@ class GpBackfill extends Command
         {system=streamline_local}
         {--from-id= : Start at this source id (inclusive)}
         {--to-id= : Stop at this source id (inclusive) — for a bounded / sanity run}
-        {--chunk=5000 : Staging read/insert batch size}
+        {--chunk=2000 : Staging read/insert batch size}
         {--workers=16 : Parallel degree for the staging and finalize phases}
         {--restart : Clear staging checkpoints and stage from the beginning}
         {--stage-only : Internal: run only the stage phase for the given range}
@@ -117,8 +117,10 @@ class GpBackfill extends Command
     {
         $procs = [];
         foreach ($argSets as $args) {
+            // -d memory_limit=512M: staging chunks build sizable in-memory arrays
+            // (persons + children + additional_info); the 128M CLI default OOMs.
             $p = Process::fromShellCommandline(
-                PHP_BINARY.' artisan gp:backfill '.$args,
+                PHP_BINARY.' -d memory_limit=512M artisan gp:backfill '.$args,
                 base_path(),
                 null,
                 null,
