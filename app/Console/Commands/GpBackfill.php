@@ -16,6 +16,7 @@ class GpBackfill extends Command
         {--chunk=2000 : Staging read/insert batch size}
         {--workers=16 : Parallel degree for the staging and finalize phases}
         {--restart : Clear staging checkpoints and stage from the beginning}
+        {--legacy-finalize : Use the per-identity sharded finalize instead of the set-based one}
         {--stage-only : Internal: run only the stage phase for the given range}
         {--segment= : Internal: staging checkpoint key for this stripe}
         {--finalize-shard= : Internal: run only the finalize phase for this shard}
@@ -75,13 +76,18 @@ class GpBackfill extends Command
         // Transform once in this process (bulk set-based, not parallel).
         (new SqlBackfill)->transform(fn ($p, $d) => $this->line("  [$p] $d"));
 
-        // #5: sharded finalize.
-        $this->line("  [finalize] $workers parallel shards...");
-        $finCmds = [];
-        for ($i = 0; $i < $workers; $i++) {
-            $finCmds[] = "--finalize-shard=$i --shards=$workers";
+        // Finalize: set-based (default) — one pass of big statements; or the
+        // legacy per-identity sharded path (--legacy-finalize).
+        if ($this->option('legacy-finalize')) {
+            $this->line("  [finalize] $workers parallel shards (per-identity)...");
+            $finCmds = [];
+            for ($i = 0; $i < $workers; $i++) {
+                $finCmds[] = "--finalize-shard=$i --shards=$workers";
+            }
+            $this->runParallel($finCmds);
+        } else {
+            (new Engine)->finalizeAllSet(fn ($p, $d) => $this->line("  [$p] $d"));
         }
-        $this->runParallel($finCmds);
 
         $c = (new SqlBackfill)->counts();
         $this->info("Done. identities={$c['identities']} links={$c['links']}");

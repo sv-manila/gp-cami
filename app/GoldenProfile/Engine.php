@@ -230,6 +230,17 @@ class Engine
     }
 
     /**
+     * Set-based whole-hub finalize — same result as finalizeAll but produced
+     * with a fixed handful of INSERT…SELECT/UPDATE…JOIN statements instead of
+     * ~25 hub round-trips per identity. Use for bulk backfill; keep finalizeAll
+     * (or finalize()) for the incremental per-identity path. Requires MySQL 8.
+     */
+    public function finalizeAllSet(?callable $log = null): void
+    {
+        (new \App\GoldenProfile\Materialize\SetFinalizer)->run($log);
+    }
+
+    /**
      * Consolidate identities that share a deterministic key — ssn_hash, npi,
      * upin, dea_number, license (number+state+board), or name+dob. Parallel
      * id-partitioned loading can mint separate identities for the same person
