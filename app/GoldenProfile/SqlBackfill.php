@@ -33,6 +33,9 @@ class SqlBackfill
     /** Single-column deterministic key tiers, in confidence order. */
     private const KEY_TIERS = ['ssn_hash', 'npi', 'upin', 'dea_number'];
 
+    /** transaction() retry attempts for InnoDB deadlocks under parallel staging. */
+    private const DEADLOCK_RETRIES = 5;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
@@ -163,7 +166,11 @@ class SqlBackfill
             foreach ($rows as $emp) {
                 $persons[] = $this->connector->personRow($emp, $accountMap);
             }
-            $this->bulkInsert('stg_person', $persons);
+            // Retry on deadlock: 16 workers doing concurrent INSERT IGNOREs take
+            // insert-intention gap locks on stg_person's unique/PK indexes and
+            // can deadlock even on disjoint id ranges. transaction($fn, N) re-runs
+            // the closure on SQLSTATE 40001/1213. Idempotent, so re-running is safe.
+            $this->hub()->transaction(fn () => $this->bulkInsert('stg_person', $persons), self::DEADLOCK_RETRIES);
 
             // resolve source_id -> stg_person_id for this chunk, attach children.
             $ids = $this->hub()->table('stg_person')
@@ -209,13 +216,14 @@ class SqlBackfill
                 }
             }
             // #6: one transaction per chunk for the child writes — a single
-            // commit/flush instead of one per insert batch.
+            // commit/flush instead of one per insert batch. Deadlock-retried
+            // (concurrent workers contend on the child tables' indexes).
             $this->hub()->transaction(function () use ($aliases, $addresses, $licenses, $identifiers) {
                 $this->bulkInsert('stg_person_alias', $aliases);
                 $this->bulkInsert('stg_person_address', $addresses);
                 $this->bulkInsert('stg_person_license', $licenses);
                 $this->bulkInsert('stg_person_identifier', $identifiers);
-            });
+            }, self::DEADLOCK_RETRIES);
 
             $this->mirrorSource($rows->pluck('id')->all());
 
@@ -298,23 +306,25 @@ class SqlBackfill
                 ->when($excludeCodes, fn ($q) => $q->whereNotIn('match_summary_status_code', $excludeCodes))
                 ->get(['id', 'employee_id', 'registry', 'match_summary_status',
                     'match_summary_status_code', 'match_is_valid', 'current', 'date_resolved']);
-            $this->bulkInsert('src_credential_match', $creds->map(fn ($c) => [
+            $credRows = $creds->map(fn ($c) => [
                 'id' => $c->id, 'employee_id' => $c->employee_id, 'registry' => $c->registry,
                 'match_summary_status' => $c->match_summary_status,
                 'match_summary_status_code' => $c->match_summary_status_code,
                 'match_is_valid' => $c->match_is_valid, 'current' => $c->current,
                 'date_resolved' => $this->cleanDate($c->date_resolved),
-            ])->all());
+            ])->all();
+            $this->hub()->transaction(fn () => $this->bulkInsert('src_credential_match', $credRows), self::DEADLOCK_RETRIES);
 
             $matches = $this->src()->table('matches')->whereIn('employee_id', $empBatch)
                 ->get(['id', 'employee_id', 'exclusion_record_id', 'is_ssn_match', 'is_npi_match',
                     'is_canonical_name_match', 'is_upin_match', 'is_license_number_match']);
-            $this->bulkInsert('src_match', $matches->map(fn ($m) => [
+            $matchRows = $matches->map(fn ($m) => [
                 'id' => $m->id, 'employee_id' => $m->employee_id, 'exclusion_record_id' => $m->exclusion_record_id,
                 'is_ssn_match' => $m->is_ssn_match, 'is_npi_match' => $m->is_npi_match,
                 'is_canonical_name_match' => $m->is_canonical_name_match, 'is_upin_match' => $m->is_upin_match,
                 'is_license_number_match' => $m->is_license_number_match,
-            ])->all());
+            ])->all();
+            $this->hub()->transaction(fn () => $this->bulkInsert('src_match', $matchRows), self::DEADLOCK_RETRIES);
             foreach ($matches->pluck('exclusion_record_id')->filter()->unique() as $rid) {
                 $recordIds[$rid] = true;
             }
@@ -323,9 +333,10 @@ class SqlBackfill
         foreach (array_chunk(array_keys($recordIds), 500) as $ridBatch) {
             $recs = $this->src()->table('exclusion_records')->whereIn('id', $ridBatch)
                 ->get(['id', 'exclusion_list_prefix']);
-            $this->bulkInsert('src_exclusion_record', $recs->map(fn ($r) => [
+            $recRows = $recs->map(fn ($r) => [
                 'id' => $r->id, 'exclusion_list_prefix' => $r->exclusion_list_prefix,
-            ])->all());
+            ])->all();
+            $this->hub()->transaction(fn () => $this->bulkInsert('src_exclusion_record', $recRows), self::DEADLOCK_RETRIES);
         }
     }
 
