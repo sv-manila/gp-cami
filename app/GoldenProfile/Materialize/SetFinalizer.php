@@ -70,6 +70,15 @@ class SetFinalizer
         $hub->statement("DELETE FROM gp_attribute WHERE attr_name IN ($nameList)");
         $hub->statement("DELETE FROM gp_survivorship_audit WHERE attribute_name IN ($nameList)");
 
+        // The canonical UPDATEs below rewrite indexed columns (ssn_hash, npi,
+        // upin, dea_number, and canonical_last/first/dob via idx_name_dob) across
+        // every identity, so each would maintain a secondary index row-by-row over
+        // ~13M rows — the survivorship bottleneck. Drop the key indexes first and
+        // rebuild once at the end (same trick resolveDeterministic uses for the
+        // residual insert). dedup already ran (it needed them); nothing between
+        // here and the rebuild needs them.
+        $this->dropIdentityKeyIndexes();
+
         foreach (self::IDENTITY_FIELDS as $canonical => $srcCol) {
             // Ranked candidates for this field: non-blank staged values, best
             // authority then newest, link_id as a deterministic final tiebreak.
@@ -114,6 +123,45 @@ class SetFinalizer
             JOIN ( SELECT identity_id, COUNT(*) c FROM gp_source_link GROUP BY identity_id ) k
               ON k.identity_id = i.identity_id
             SET i.record_count = k.c, i.last_updated = NOW()");
+
+        // Rebuild the key indexes the canonical updates skipped (dedup/sync need them).
+        $this->addIdentityKeyIndexes();
+    }
+
+    /** gp_identity key indexes — mirror of SqlBackfill::IDENTITY_KEY_INDEXES. */
+    private const IDENTITY_KEY_INDEXES = [
+        'idx_ssn' => 'ssn_hash',
+        'idx_npi' => 'npi',
+        'idx_upin' => 'upin',
+        'idx_dea' => 'dea_number',
+        'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob',
+    ];
+
+    private function dropIdentityKeyIndexes(): void
+    {
+        foreach (array_keys(self::IDENTITY_KEY_INDEXES) as $name) {
+            if ($this->indexExists('gp_identity', $name)) {
+                $this->hub()->statement("ALTER TABLE gp_identity DROP INDEX `$name`");
+            }
+        }
+    }
+
+    private function addIdentityKeyIndexes(): void
+    {
+        foreach (self::IDENTITY_KEY_INDEXES as $name => $cols) {
+            if (! $this->indexExists('gp_identity', $name)) {
+                $this->hub()->statement("ALTER TABLE gp_identity ADD INDEX `$name` ($cols)");
+            }
+        }
+    }
+
+    private function indexExists(string $table, string $index): bool
+    {
+        return (bool) $this->hub()->selectOne(
+            'SELECT 1 FROM information_schema.statistics
+             WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ? LIMIT 1',
+            [$table, $index],
+        );
     }
 
     /**
@@ -136,49 +184,82 @@ class SetFinalizer
 
     // ---- 2. MATERIALIZE ---------------------------------------------------
 
+    /** identities per materialize chunk (each chunk commits independently). */
+    private const MATERIALIZE_CHUNK = 250000;
+
     /**
-     * Rebuild gp_identity_profile for every identity in one INSERT…SELECT,
-     * aggregating each child collection with JSON_ARRAYAGG. Same JSON shape and
-     * scalar picks as Materialize\ProfileMaterializer::rebuild.
+     * Rebuild gp_identity_profile for every identity, aggregating each child
+     * collection with JSON_ARRAYAGG. Same JSON shape and scalar picks as
+     * Materialize\ProfileMaterializer::rebuild.
+     *
+     * Chunked by identity_id range: each range is DELETE+INSERT in its own
+     * autocommitted statement, so an interruption (crash / power-off) loses only
+     * the in-flight chunk instead of forcing a multi-hour rollback of a single
+     * 13M-row INSERT, and a re-run resumes cheaply (completed chunks just get
+     * rewritten). Each chunk's aggregate subqueries also scan only their slice.
+     *
+     * @param  callable|null  $progress  fn(int $lo, int $hi, int $done)
      */
-    public function materialize(): void
+    public function materialize(?callable $progress = null): void
     {
         $hub = $this->hub();
-        $hub->statement('DELETE FROM gp_identity_profile');
+        $b = $hub->selectOne('SELECT MIN(identity_id) lo, MAX(identity_id) hi FROM gp_identity');
+        if (! $b || $b->lo === null) {
+            return;
+        }
+        $min = (int) $b->lo;
+        $max = (int) $b->hi;
+        $done = 0;
+        for ($lo = $min; $lo <= $max; $lo += self::MATERIALIZE_CHUNK) {
+            $hi = $lo + self::MATERIALIZE_CHUNK;   // exclusive upper bound
+            $done += $this->materializeRange($lo, $hi);
+            if ($progress) {
+                $progress($lo, $hi, $done);
+            }
+        }
+    }
 
+    /** Build gp_identity_profile rows for identity_id in [$lo, $hi). Returns rows written. */
+    private function materializeRange(int $lo, int $hi): int
+    {
+        $hub = $this->hub();
         $jb = fn (string $e) => "CASE WHEN ($e) THEN CAST('true' AS JSON) ELSE CAST('false' AS JSON) END";
         $link = 'sp.system_id = l.system_id AND sp.source_table = l.source_table AND sp.source_id = l.source_id';
+        // Chunk range predicates. $r for tables with an identity_id column,
+        // $rL for gp_source_link-based subqueries (aliased l).
+        $r = "identity_id >= $lo AND identity_id < $hi";
+        $rL = "l.identity_id >= $lo AND l.identity_id < $hi";
 
-        // Per-identity aggregate CTEs (each one row per identity_id).
+        // Per-identity aggregate CTEs (each one row per identity_id), range-scoped.
         $lic = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('number',license_number,'state',certification_state,
                         'board',certification_board,'type',license_type,'registry',registry,
                         'verified',{$jb('is_verified=1')})) js
-                FROM gp_license GROUP BY identity_id";
+                FROM gp_license WHERE $r GROUP BY identity_id";
 
         $idt = "SELECT identity_id,
                     COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('type',id_type,'value',id_value)) js,
                     MAX(CASE WHEN id_type='dea' THEN id_value END) dea
-                FROM (SELECT DISTINCT identity_id,id_type,id_value FROM gp_identity_identifier) u
+                FROM (SELECT DISTINCT identity_id,id_type,id_value FROM gp_identity_identifier WHERE $r) u
                 GROUP BY identity_id";
 
         $addr = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('type', IF(is_primary=1,'primary','alt'),
                         'address1',address1,'address2',address2,'city',city,'state',state,'zip',zip)) js
-                 FROM gp_address GROUP BY identity_id";
+                 FROM gp_address WHERE $r GROUP BY identity_id";
 
         // primary address scalars: is_primary first, then lowest address_id.
         $prim = "SELECT identity_id, address1, city, state, zip FROM (
                     SELECT identity_id, address1, city, state, zip,
                         ROW_NUMBER() OVER (PARTITION BY identity_id ORDER BY is_primary DESC, address_id ASC) rn
-                    FROM gp_address ) t WHERE rn = 1";
+                    FROM gp_address WHERE $r ) t WHERE rn = 1";
 
         $cred = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('credential_match_id',credential_match_id,'registry',registry,
                         'status',match_summary_status,'status_code',match_summary_status_code,
                         'valid',{$jb('match_is_valid=1')},'current',{$jb('`current`=1')},'link_state',link_state)) js
-                 FROM gp_identity_credential GROUP BY identity_id";
+                 FROM gp_identity_credential WHERE $r GROUP BY identity_id";
 
         $excl = "SELECT identity_id, COUNT(*) cnt,
                     MAX(link_state <> 'rejected') act,
@@ -186,20 +267,20 @@ class SetFinalizer
                         'is_ssn_match',{$jb('is_ssn_match=1')},'is_npi_match',{$jb('is_npi_match=1')},
                         'is_canonical_name_match',{$jb('is_canonical_name_match=1')},
                         'is_license_number_match',{$jb('is_license_number_match=1')},'link_state',link_state)) js
-                 FROM gp_identity_exclusion GROUP BY identity_id";
+                 FROM gp_identity_exclusion WHERE $r GROUP BY identity_id";
 
         $board = "SELECT identity_id, COUNT(*) cnt,
                     MAX(resolution_date IS NULL) act,
                     JSON_ARRAYAGG(JSON_OBJECT('registry',registry,'action_type',action_type,
                         'action_date',COALESCE(CAST(action_date AS CHAR),''),
                         'resolution_date',COALESCE(CAST(resolution_date AS CHAR),''))) js
-                  FROM gp_board_action GROUP BY identity_id";
+                  FROM gp_board_action WHERE $r GROUP BY identity_id";
 
         $res = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('domain',domain,'target_key',target_key,'decision',decision,
                         'resolved_by',resolved_by,'resolved_at',COALESCE(CAST(resolved_at AS CHAR),''),
                         'auto_resolvable',{$jb('is_auto_resolvable=1')})) js
-                 FROM gp_identity_resolution WHERE is_current = 1 GROUP BY identity_id";
+                 FROM gp_identity_resolution WHERE is_current = 1 AND $r GROUP BY identity_id";
 
         $src = "SELECT l.identity_id, COUNT(*) record_count, COUNT(DISTINCT l.system_id) system_count,
                     JSON_ARRAYAGG(JSON_OBJECT('system_code',COALESCE(ss.system_code,CAST(l.system_id AS CHAR)),
@@ -207,11 +288,12 @@ class SetFinalizer
                         'account_id', IF(l.account_id, l.account_id, NULL))) js
                 FROM gp_source_link l
                 LEFT JOIN gp_source_system ss ON ss.system_id = l.system_id
+                WHERE $rL
                 GROUP BY l.identity_id";
 
         $acct = "SELECT identity_id, COUNT(*) account_count, JSON_ARRAYAGG(account_id) js FROM (
                     SELECT DISTINCT identity_id, account_id FROM gp_source_link
-                    WHERE account_id IS NOT NULL AND account_id <> 0 ) a
+                    WHERE account_id IS NOT NULL AND account_id <> 0 AND $r ) a
                  GROUP BY identity_id";
 
         $alias = "SELECT identity_id, JSON_ARRAYAGG(JSON_OBJECT('type',alias_type,'first',first_name,'last',last_name)) js
@@ -219,21 +301,25 @@ class SetFinalizer
                     SELECT DISTINCT l.identity_id, a.alias_type, a.first_name, a.last_name
                     FROM gp_source_link l
                     JOIN stg_person sp ON $link
-                    JOIN stg_person_alias a ON a.stg_person_id = sp.stg_person_id ) u
+                    JOIN stg_person_alias a ON a.stg_person_id = sp.stg_person_id
+                    WHERE $rL ) u
                   GROUP BY identity_id";
 
         $term = "SELECT identity_id, termd FROM (
                     SELECT l.identity_id, sp.terminated AS termd,
                         ROW_NUMBER() OVER (PARTITION BY l.identity_id ORDER BY sp.source_modified DESC, sp.stg_person_id DESC) rn
-                    FROM gp_source_link l JOIN stg_person sp ON $link ) t WHERE rn = 1";
+                    FROM gp_source_link l JOIN stg_person sp ON $link WHERE $rL ) t WHERE rn = 1";
 
         $ssn4 = "SELECT identity_id, ssn_last_four FROM (
                     SELECT l.identity_id, sp.ssn_last_four,
                         ROW_NUMBER() OVER (PARTITION BY l.identity_id ORDER BY sp.stg_person_id ASC) rn
                     FROM gp_source_link l JOIN stg_person sp ON $link
-                    WHERE sp.ssn_last_four IS NOT NULL ) t WHERE rn = 1";
+                    WHERE sp.ssn_last_four IS NOT NULL AND $rL ) t WHERE rn = 1";
 
-        $sql = "
+        // Idempotent per chunk: clear the slice, then rebuild it.
+        $hub->statement("DELETE FROM gp_identity_profile WHERE $r");
+
+        $hub->statement("
         INSERT INTO gp_identity_profile
             (identity_id, identity_uuid, first_name, middle_name, last_name, suffix, date_of_birth,
              ssn_hash, ssn_last_four, npi, upin, dea_number, identifier_count, identifiers,
@@ -273,8 +359,9 @@ class SetFinalizer
         LEFT JOIN ($acct) acct   ON acct.identity_id = i.identity_id
         LEFT JOIN ($alias) alias ON alias.identity_id = i.identity_id
         LEFT JOIN ($term) term   ON term.identity_id = i.identity_id
-        LEFT JOIN ($ssn4) ssn4   ON ssn4.identity_id = i.identity_id";
+        LEFT JOIN ($ssn4) ssn4   ON ssn4.identity_id = i.identity_id
+        WHERE i.identity_id >= $lo AND i.identity_id < $hi");
 
-        $hub->statement($sql);
+        return (int) $hub->selectOne("SELECT COUNT(*) c FROM gp_identity_profile WHERE $r")->c;
     }
 }
