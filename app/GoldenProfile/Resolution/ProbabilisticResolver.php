@@ -37,6 +37,21 @@ class ProbabilisticResolver
             return [null, 0.0, 'no_match'];
         }
 
+        // Oversized blocks carry no evidence. block_key is surname-soundex + DOB,
+        // and rows with no DOB collapse into buckets like "D500|____" holding
+        // 107,164 people — that is "surname sounds like D-500", not a candidate
+        // set. Scoring one costs ~30s per source row and cannot produce a
+        // defensible match, so the block_size_cap is enforced here: over the cap,
+        // Pass B declines and the caller mints a new identity.
+        $cap = (int) ($this->cfg['block_size_cap'] ?? 0);
+        if ($cap > 0) {
+            $blockSize = (int) $this->hub()->table('stg_person')
+                ->where('block_key', $p->block_key)->count();
+            if ($blockSize > $cap) {
+                return [null, 0.0, 'no_match'];
+            }
+        }
+
         $candidateIds = $this->hub()->table('gp_source_link as l')
             ->join('stg_person as sp', function ($j) {
                 $j->on('sp.system_id', '=', 'l.system_id')
@@ -51,9 +66,22 @@ class ProbabilisticResolver
 
         $best = null;
         $bestScore = 0.0;
-        foreach ($candidateIds as $cid) {
-            $identity = $this->hub()->table('gp_identity')->where('identity_id', $cid)->first();
-            if (! $identity || $this->hardNo($p, $identity)) {
+
+        // Candidates are loaded in batches, not one query each. A block_key like
+        // "smith|1992-09-21" can hold thousands of members (the seeded test-data
+        // pile-ups run to 12k), and a per-candidate SELECT made every new source
+        // row cost that many round-trips — measured at ~13,500 hub queries per
+        // row, which pinned gp:sync at ~0.03 rows/sec.
+        $identities = collect();
+        foreach ($candidateIds->chunk(1000) as $batch) {
+            $identities = $identities->merge(
+                $this->hub()->table('gp_identity')->whereIn('identity_id', $batch->all())->get()
+            );
+        }
+
+        foreach ($identities as $identity) {
+            $cid = $identity->identity_id;
+            if ($this->hardNo($p, $identity)) {
                 continue;
             }
             // strict name prerequisite (first+last equal, middle/suffix/dob compatible)

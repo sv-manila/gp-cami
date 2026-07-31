@@ -184,8 +184,17 @@ class SetFinalizer
 
     // ---- 2. MATERIALIZE ---------------------------------------------------
 
-    /** identities per materialize chunk (each chunk commits independently). */
-    private const MATERIALIZE_CHUNK = 250000;
+    /**
+     * Identities per materialize chunk (each chunk commits independently).
+     *
+     * 25k, not 250k: a chunk is DELETE-then-INSERT, and the low id ranges hold
+     * the seeded pile-up identities whose profile rows carry ~100MB of rollup
+     * JSON each. At 250k a single chunk's DELETE ran over 8 minutes and built an
+     * undo log big enough that interrupting it was expensive. Smaller chunks
+     * mean more statements but far less undo per statement, and the job can be
+     * stopped cleanly between chunks.
+     */
+    private const MATERIALIZE_CHUNK = 25000;
 
     /**
      * Rebuild gp_identity_profile for every identity, aggregating each child

@@ -142,13 +142,20 @@ class DeterministicResolver
                 return [(int) $id, 'license_registry', 0.99];
             }
         }
-        // name + dob (lower confidence)
+        // name + dob (lower confidence).
+        // Plain column comparisons on purpose: the name columns are
+        // utf8mb4_unicode_ci (already case-insensitive) and canonical_dob is a
+        // DATE, so LOWER()/whereDate() only served to make the predicate
+        // non-sargable — idx_name_dob (canonical_last, canonical_first,
+        // canonical_dob) was skipped and every probe scanned ~6.5M rows
+        // (EXPLAIN: type=ref key=idx_status rows=6475711 vs key=idx_name_dob rows=1),
+        // which pinned incremental sync at ~0.03 rows/sec.
         if ($p->last_name && $p->first_name && $p->date_of_birth) {
             $id = $hub->table('gp_identity')
                 ->where('status', 'active')
-                ->whereRaw('LOWER(canonical_last) = ?', [mb_strtolower($p->last_name)])
-                ->whereRaw('LOWER(canonical_first) = ?', [mb_strtolower($p->first_name)])
-                ->whereDate('canonical_dob', $p->date_of_birth)
+                ->where('canonical_last', $p->last_name)
+                ->where('canonical_first', $p->first_name)
+                ->where('canonical_dob', $p->date_of_birth)
                 ->value('identity_id');
             if ($id) {
                 return [(int) $id, 'name_dob', 0.95];
