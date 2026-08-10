@@ -41,9 +41,112 @@ class CredentialSelector
      * @param  bool  $respectExpiry  mirrors golden_profile.credential_search.respect_expiry_date
      * @param  string  $today  CURDATE() equivalent, as Y-m-d
      */
-    public static function pick(Collection $links, bool $respectExpiry, string $today): ?object
+    public static function pick(
+        Collection $links,
+        bool $respectExpiry,
+        string $today,
+        ?string $ssn = null,
+        ?string $dob = null,
+    ): ?object {
+        return self::qualifying($links, $respectExpiry, $today, $ssn, $dob)->first();
+    }
+
+    /**
+     * Does this link's own recorded identity agree with what the caller supplied?
+     *
+     * A credential match records the parameters its scrape was run with. Where an
+     * SSN or DOB is among them, that match is evidence about ONE person, so
+     * returning it for a request that names a different SSN or DOB — or that
+     * cannot name one at all — attributes another person's credential to this one.
+     *
+     * A match carrying NO ssn/dob is not evidence either way and always passes;
+     * that is the overwhelming majority (24 of 3,000 recent rows carry an SSN, 4 a
+     * DOB). So this gate changes the answer rarely, and only where the data is
+     * specific enough for it to matter.
+     *
+     * Comparison is on digits for SSN and on the date part for DOB, since the
+     * payload stores an SSN as 9 bare digits while callers may send 123-45-6789.
+     */
+    public static function identityAgrees(object $link, ?string $ssn, ?string $dob): bool
     {
-        return self::qualifying($links, $respectExpiry, $today)->first();
+        // SSNs arrive in two shapes and must be compared at the precision actually
+        // available. Older rolled-up payloads store a MASKED value ("xxx-xx-0503",
+        // 3 of identity 18's 6 real matches); newer ones store 9 bare digits.
+        // Reading the mask as a whole SSN would compare "0503" against a caller's
+        // full number, never agree, and withhold correct credentials.
+        $linkSsn = self::ssnParts($link->req_ssn ?? null);
+        if ($linkSsn['known']) {
+            $reqSsn = self::ssnParts($ssn);
+
+            if (! $reqSsn['known']) {
+                return false;   // the match is SSN-specific; the request is not
+            }
+
+            // Full against full when both are complete, otherwise on the last four
+            // — the strongest precision the pair has in common.
+            $agrees = ($linkSsn['full'] !== null && $reqSsn['full'] !== null)
+                ? $linkSsn['full'] === $reqSsn['full']
+                : $linkSsn['last4'] === $reqSsn['last4'];
+
+            if (! $agrees) {
+                return false;
+            }
+        }
+
+        $linkDob = self::dobValue($link->req_dob ?? null);
+        if ($linkDob !== '') {
+            if (self::dobValue($dob) === '') {
+                return false;
+            }
+            if ($linkDob !== self::dobValue($dob)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** Date part of a DOB, or '' when absent — blank, whitespace or a zero date. */
+    private static function dobValue($value): string
+    {
+        return self::blank($value) ? '' : self::dateOnly(trim((string) $value));
+    }
+
+    /**
+     * Decompose an SSN into what is actually known about it.
+     *
+     * Handles both stored shapes: 9 bare digits, and a mask such as "xxx-xx-0503"
+     * that reveals only the last four. Returns ['known'=>bool, 'full'=>?string,
+     * 'last4'=>?string] so a comparison can pick the precision the two sides share
+     * rather than assuming every value is complete.
+     *
+     * @return array{known:bool,full:?string,last4:?string}
+     */
+    private static function ssnParts($value): array
+    {
+        $absent = ['known' => false, 'full' => null, 'last4' => null];
+
+        if (self::blank($value)) {
+            return $absent;
+        }
+
+        $digits = preg_replace('/\D+/', '', (string) $value) ?? '';
+
+        if ($digits === '') {
+            return $absent;     // a fully masked value carries no information
+        }
+
+        if (strlen($digits) >= 9) {
+            $full = substr($digits, -9);
+
+            return ['known' => true, 'full' => $full, 'last4' => substr($full, -4)];
+        }
+
+        // Partial — a mask. Only the trailing digits are usable, and fewer than
+        // four is too weak to distinguish people, so treat it as unknown.
+        return strlen($digits) >= 4
+            ? ['known' => true, 'full' => null, 'last4' => substr($digits, -4)]
+            : $absent;
     }
 
     /**
@@ -52,9 +155,18 @@ class CredentialSelector
      * @param  Collection<int,object>  $links
      * @return Collection<int,object>
      */
-    public static function qualifying(Collection $links, bool $respectExpiry, string $today): Collection
-    {
+    public static function qualifying(
+        Collection $links,
+        bool $respectExpiry,
+        string $today,
+        ?string $ssn = null,
+        ?string $dob = null,
+    ): Collection {
         return $links
+            // Drop matches whose own recorded SSN/DOB does not agree with the
+            // request before anything else — a disagreeing match is the wrong
+            // person's credential, so it should not even be a ranking candidate.
+            ->filter(fn ($l) => self::identityAgrees($l, $ssn, $dob))
             // expiry_date IS NULL OR expiry_date >= CURDATE(). A missing source row
             // leaves expiry_date null, which the LEFT JOIN also treated as passing.
             ->filter(fn ($l) => ! $respectExpiry
@@ -88,7 +200,17 @@ class CredentialSelector
 
     private static function blank($value): bool
     {
-        return $value === null || $value === '' || $value === '0000-00-00'
-            || $value === '0000-00-00 00:00:00';
+        if ($value === null) {
+            return true;
+        }
+
+        // Trimmed: a whitespace-only payload field is absent, not a value. Without
+        // this, req_dob="   " read as a recorded date of birth and withheld the
+        // match from every request.
+        $trimmed = is_string($value) ? trim($value) : $value;
+
+        return $trimmed === '' || $trimmed === '0000-00-00' || $trimmed === '0000-00-00 00:00:00'
+            // A zero date can also arrive with a time part or as a bare zero year.
+            || (is_string($trimmed) && preg_match('/^0000-00-00/', $trimmed) === 1);
     }
 }

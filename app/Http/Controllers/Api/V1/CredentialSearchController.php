@@ -24,21 +24,32 @@ class CredentialSearchController extends Controller
      */
     public function __invoke(CredentialSearchRequest $request): JsonResponse
     {
-        // Fail loudly rather than silently ignoring the SSN. The caller sends an
-        // SSN precisely to disambiguate same-name people; dropping it from the
-        // query and answering 200 anyway can hand back a DIFFERENT person's
-        // credential and exclusion data, which is worse than no answer at all.
+        // A supplied SSN does two separate jobs, and only one of them needs the
+        // shared hash key:
+        //
+        //   1. narrowing identity resolution, by matching gp_identity_profile
+        //      .ssn_hash — impossible without the key;
+        //   2. gating credential matches whose own scrape recorded an SSN, which
+        //      compares against the value in the payload and needs no key at all.
+        //
+        // Refusing the whole request when the key is missing would disable (2) as
+        // well, and the key is absent in every environment that has not been given
+        // GP_SSN_PLAINTEXT_KEY. So (2) still runs, (1) is skipped, and the response
+        // says so — the point of the original refusal was that a dropped SSN filter
+        // must never be silent, not that it must be fatal.
+        $warnings = [];
+
         if ($request->filled('ssn') && ! $this->ssnHasher->available()) {
             $reason = $this->ssnHasher->unavailableReason() ?? 'unknown';
-            Log::error('credential-search cannot honour the ssn narrower', ['reason' => $reason]);
+            Log::warning('credential-search cannot use the ssn for identity resolution', ['reason' => $reason]);
 
-            return response()->json([
-                'error' => 'ssn_matching_unavailable',
-                'message' => 'An SSN was supplied but SSN matching is not available on this instance, '
-                    .'so the request cannot be answered without risking a wrong-person match. '
-                    .'Retry without "ssn", or configure GP_SSN_PLAINTEXT_KEY.',
+            $warnings[] = [
+                'code' => 'ssn_not_used_for_identity_resolution',
+                'message' => 'SSN hashing is unavailable on this instance, so the SSN did not narrow '
+                    .'which identity was resolved — it was still used to exclude credential matches '
+                    .'recorded against a different SSN. Configure GP_SSN_PLAINTEXT_KEY to narrow on it.',
                 'reason' => $reason,
-            ], 503);
+            ];
         }
 
         $identity = $this->resolveIdentity($request);
@@ -48,6 +59,7 @@ class CredentialSearchController extends Controller
                 'match' => null,
                 'prior_resolution' => null,
                 'message' => 'No identity resolved for the given inputs.',
+                'warnings' => $warnings,
             ], 404);
         }
 
@@ -64,6 +76,7 @@ class CredentialSearchController extends Controller
             ],
             'match' => $match,
             'prior_resolution' => $prior,
+            'warnings' => $warnings,
         ], 200);
     }
 
@@ -84,8 +97,11 @@ class CredentialSearchController extends Controller
             $q->where('date_of_birth', $r->date('dob')->toDateString());
         }
 
-        if ($r->filled('ssn')) {
-            // Availability is asserted in __invoke(), so this is never empty here.
+        // Only when a key exists. candidateHashes() returns [] without one, and
+        // whereIn('ssn_hash', []) matches NOTHING — so an unavailable key would
+        // turn every SSN-bearing request into a 404 rather than simply not
+        // narrowing. __invoke() has already recorded the warning for this case.
+        if ($r->filled('ssn') && $this->ssnHasher->available()) {
             $q->whereIn('ssn_hash', $this->ssnHasher->candidateHashes($r->input('ssn')));
         }
 
@@ -199,6 +215,12 @@ class CredentialSearchController extends Controller
         $best = null;
         $sawAny = false;
 
+        // Gate values for CredentialSelector::identityAgrees(). A match whose own
+        // scrape recorded an SSN or DOB is only returned when the request names the
+        // same one, so these travel with every selection call.
+        $reqSsn = $r->filled('ssn') ? (string) $r->input('ssn') : null;
+        $reqDob = $r->filled('dob') ? $r->date('dob')->toDateString() : null;
+
         // Chunked PER SOURCE SYSTEM, not across all of them.
         //
         // chunkById needs a strictly unique cursor column, and
@@ -215,16 +237,29 @@ class CredentialSearchController extends Controller
             $linkQuery->clone()
                 ->where('system_id', $systemId)
                 ->orderBy('credential_match_id')
-                ->chunkById($chunkSize, function ($links) use (&$best, &$sawAny, $respectExpiry, $today) {
+                ->chunkById($chunkSize, function ($links) use (&$best, &$sawAny, $respectExpiry, $today, $reqSsn, $reqDob) {
                     $sawAny = true;
 
                     $ids = $links->pluck('credential_match_id')->filter()->all();
 
+                    // req_ssn / req_dob are the SSN and DOB the match's own scrape
+                    // was run with. Extracted server-side rather than by shipping
+                    // `match` here: it is a mediumtext payload and only these two
+                    // scalars are needed. JSON_VALID guards the extraction — every
+                    // one of 3,000 sampled rows was valid JSON, but a malformed
+                    // payload must yield NULL, not fail the whole batch.
                     $dates = $ids === []
                         ? collect()
                         : DB::connection('streamline_local')->table('credential_matches')
                             ->whereIn('id', $ids)
-                            ->get(['id', 'expiry_date', 'date_updated', 'date_created'])
+                            ->selectRaw("id, expiry_date, date_updated, date_created,
+                                CASE WHEN JSON_VALID(`match`)
+                                     THEN JSON_UNQUOTE(JSON_EXTRACT(`match`, '$.request_params.ssn'))
+                                END AS req_ssn,
+                                CASE WHEN JSON_VALID(`match`)
+                                     THEN JSON_UNQUOTE(JSON_EXTRACT(`match`, '$.request_params.date_of_birth'))
+                                END AS req_dob")
+                            ->get()
                             ->keyBy('id');
 
                     $withDates = $links->map(function ($link) use ($dates) {
@@ -232,6 +267,8 @@ class CredentialSearchController extends Controller
                         $link->expiry_date = $d->expiry_date ?? null;
                         $link->date_updated = $d->date_updated ?? null;
                         $link->date_created = $d->date_created ?? null;
+                        $link->req_ssn = $d->req_ssn ?? null;
+                        $link->req_dob = $d->req_dob ?? null;
 
                         return $link;
                     });
@@ -240,10 +277,16 @@ class CredentialSearchController extends Controller
                     // because the comparator is a total order, so best-of-bests
                     // equals best-of-all — including across systems, since the fold
                     // carries $best between iterations of the outer loop too.
-                    $candidates = collect([$best, CredentialSelector::pick($withDates, $respectExpiry, $today)])
-                        ->filter();
+                    $candidates = collect([
+                        $best,
+                        CredentialSelector::pick($withDates, $respectExpiry, $today, $reqSsn, $reqDob),
+                    ])->filter();
 
-                    $best = CredentialSelector::pick($candidates, $respectExpiry, $today);
+                    // The running winner already passed the gate, so re-checking it
+                    // is a no-op — but passing the criteria keeps the two calls
+                    // identical, so a future change cannot make the fold apply a
+                    // different rule than the per-chunk selection.
+                    $best = CredentialSelector::pick($candidates, $respectExpiry, $today, $reqSsn, $reqDob);
                 }, 'credential_match_id');
         }
 
