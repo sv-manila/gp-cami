@@ -186,6 +186,20 @@ return [
         // whereIn placeholder count: an over-merged identity can hold >360k links
         // for one registry, which as a single statement exceeds MySQL's 65,535
         // placeholder limit.
+        //
+        // DO NOT RAISE THIS. It looks like a batching knob that trades round trips
+        // for throughput, and it is not — each chunk becomes a whereIn against the
+        // CAMI source, which is a remote server, and a large placeholder list there
+        // is pathologically slow. Measured on identity 59 (9,358 links) with
+        // idx_identity_registry_match in place:
+        //
+        //     chunk=1000    8.9s
+        //     chunk=2000    6.8s
+        //     chunk=5000  360.7s     <-- 50x worse
+        //     chunk=10000 178.5s
+        //
+        // All sizes return the same credential, so the only thing tuning this can
+        // change is how slow the endpoint is. 1000-2000 is the usable band.
         'link_chunk_size'         => 1000,
         // Refuse to resolve an identity holding more than this many qualifying
         // links for one registry: the per-link source-side date lookups make it
