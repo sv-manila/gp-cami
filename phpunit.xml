@@ -26,6 +26,17 @@
         <env name="DB_CONNECTION" value="sqlite"/>
         <env name="DB_DATABASE" value=":memory:"/>
         <env name="DB_URL" value=""/>
+        <!-- The hub and source connections are NOT sqlite-overridden by
+             DB_CONNECTION, so without these a test that touches the
+             golden_profile or streamline_local connection would silently read
+             and write the real shared hub on app2.streamlineverify.local.
+             Point them at a dead local socket so any such test fails loudly. -->
+        <env name="GP_DB_HOST" value="127.0.0.1"/>
+        <env name="GP_DB_PORT" value="1"/>
+        <env name="GP_DB_DATABASE" value="gp_cami_test_should_not_connect"/>
+        <env name="SRC_DB_HOST" value="127.0.0.1"/>
+        <env name="SRC_DB_PORT" value="1"/>
+        <env name="SRC_DB_DATABASE" value="gp_cami_test_should_not_connect"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
