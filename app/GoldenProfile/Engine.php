@@ -6,6 +6,7 @@ use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Materialize\ProfileMaterializer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
+use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -29,6 +30,8 @@ class Engine
 
     private Survivorship $survivorship;
 
+    private SsnHashGuard $ssnGuard;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
@@ -36,6 +39,7 @@ class Engine
         $this->resolver = new DeterministicResolver($this->systemId);
         $this->materializer = new ProfileMaterializer;
         $this->survivorship = new Survivorship;
+        $this->ssnGuard = new SsnHashGuard;
     }
 
     /** Per affected identity: recompute survivorship winners, then rebuild the profile. */
@@ -297,6 +301,12 @@ class Engine
         $q = $this->shardFilter($q, $col, $shard, $shards);
         $dupVals = $q->groupBy($col)->havingRaw('COUNT(*) > 1')->pluck($col);
         foreach ($dupVals as $val) {
+            // A filler ssn_hash is not evidence of shared identity. Resolution now
+            // refuses to bind on one, but dedup would still fold together any
+            // identities that already carry it — so screen here too.
+            if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($val)) {
+                continue;
+            }
             $ids = $hub->table('gp_identity')
                 ->where($col, $val)->where('status', 'active')
                 ->orderBy('identity_id')->pluck('identity_id')->all();
@@ -372,18 +382,35 @@ class Engine
     {
         $hub = $this->hub();
         $n = 0;
+        // No LOWER() anywhere: canonical_first/canonical_last are utf8mb4_unicode_ci
+        // so grouping and comparing are already case-insensitive, and canonical_dob
+        // is a DATE. Wrapping them made the per-group probe below non-sargable —
+        // the same defect documented in DeterministicResolver::matchDeterministic()
+        // that pinned sync at ~0.03 rows/sec, one probe per duplicate group.
         $q = $hub->table('gp_identity')
             ->where('status', 'active')
             ->whereNotNull('canonical_first')->whereNotNull('canonical_last')->whereNotNull('canonical_dob')
-            ->selectRaw('LOWER(canonical_first) f, LOWER(canonical_last) l, canonical_dob d');
+            ->select('canonical_first as f', 'canonical_last as l', 'canonical_dob as d');
+        // The shard expression KEEPS LOWER(), unlike the probe below. Two reasons,
+        // both correctness rather than style:
+        //   1. CRC32 hashes raw bytes, but the GROUP BY above is case-insensitive
+        //      (utf8mb4_unicode_ci). Hashing the unfolded value would put "Smith"
+        //      and "SMITH" — one group — in different shards, so a sharded run
+        //      could process a group twice or, worse, split it and merge neither
+        //      half completely.
+        //   2. It keeps the shard partition byte-identical to previous releases,
+        //      so a sharded dedup interrupted before this change and resumed after
+        //      it does not silently skip the rows that changed shard.
+        // Only the per-group probe needed to become sargable; this expression is
+        // evaluated once per row of an aggregate that scans regardless.
         $q = $this->shardFilter($q, "CONCAT_WS('|',LOWER(canonical_last),LOWER(canonical_first),canonical_dob)", $shard, $shards);
         $groups = $q->groupBy('f', 'l', 'd')->havingRaw('COUNT(*) > 1')->get();
         foreach ($groups as $g) {
             $ids = $hub->table('gp_identity')
                 ->where('status', 'active')
-                ->whereRaw('LOWER(canonical_first) = ?', [$g->f])
-                ->whereRaw('LOWER(canonical_last) = ?', [$g->l])
-                ->whereDate('canonical_dob', $g->d)
+                ->where('canonical_last', $g->l)
+                ->where('canonical_first', $g->f)
+                ->where('canonical_dob', $g->d)
                 ->orderBy('identity_id')->pluck('identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {

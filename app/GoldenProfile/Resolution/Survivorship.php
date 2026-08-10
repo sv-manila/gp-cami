@@ -74,7 +74,17 @@ class Survivorship
                 if ($ra !== $rb) {
                     return $ra <=> $rb;                 // lower rank = higher authority
                 }
-                return strcmp((string) $b->source_modified, (string) $a->source_modified); // newer wins
+                $recency = strcmp((string) $b->source_modified, (string) $a->source_modified); // newer wins
+                if ($recency !== 0) {
+                    return $recency;
+                }
+                // Final tiebreak MUST match SetFinalizer's SQL ordering (which ends
+                // in link_id ASC). Without it, a full authority+recency tie is
+                // broken by whatever order the DB returned rows in, so the
+                // incremental path here and the bulk path there could crown
+                // different canonical winners for the same identity — which breaks
+                // the "rebuild produces a byte-identical profile" invariant.
+                return $a->link_id <=> $b->link_id;
             })->values();
 
             $winner = $ranked->first();

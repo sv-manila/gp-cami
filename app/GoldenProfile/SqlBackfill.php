@@ -3,6 +3,7 @@
 namespace App\GoldenProfile;
 
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
+use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -30,6 +31,8 @@ class SqlBackfill
 
     private StreamlineLocalConnector $connector;
 
+    private SsnHashGuard $ssnGuard;
+
     /** Single-column deterministic key tiers, in confidence order. */
     private const KEY_TIERS = ['ssn_hash', 'npi', 'upin', 'dea_number'];
 
@@ -40,6 +43,7 @@ class SqlBackfill
     {
         $this->systemId = $this->ensureSystem();
         $this->connector = new StreamlineLocalConnector($this->systemId);
+        $this->ssnGuard = new SsnHashGuard;
     }
 
     private function hub()
@@ -116,7 +120,7 @@ class SqlBackfill
         $log ??= fn ($p, $d) => null;
         $this->indexStaging($log);
         $log('resolve', 'deterministic tiers');
-        $this->resolveDeterministic();
+        $this->resolveDeterministic($log);
         $log('enrich', 'licenses + addresses + identifiers');
         $this->enrich();
         $log('dedup', 'merge duplicate identities');
@@ -342,8 +346,17 @@ class SqlBackfill
 
     // ---- 2. RESOLVE (set-based) -------------------------------------------
 
-    public function resolveDeterministic(): void
+    public function resolveDeterministic(?callable $log = null): void
     {
+        $log ??= fn ($p, $d) => null;
+
+        // Filler SSNs must be identified before the ssn_hash tier runs. Without
+        // this, every person carrying a placeholder SSN hashes to the same value
+        // and the tier binds them all to one identity at 0.99 confidence with no
+        // name or DOB cross-check — a false merge nothing downstream undoes.
+        $blocked = $this->ssnGuard->buildBlocklistTable();
+        $log('resolve', "ssn_hash blocklist: $blocked filler hash(es) excluded");
+
         // Single-column key tiers, highest confidence first. After each tier we
         // backfill identity keys from the just-linked rows so a later tier sees
         // an earlier identity's secondary keys (mirrors row-by-row backfillKeys)
@@ -433,6 +446,11 @@ class SqlBackfill
     /** Create one identity per distinct new value of $col among unlinked rows. */
     private function tierCreate(string $col): void
     {
+        // ssn_hash only: skip rows whose hash is on the filler blocklist so they
+        // fall through to the weaker-but-safe name+dob / residual tiers instead of
+        // all collapsing onto one identity.
+        $guard = $col === 'ssn_hash' ? $this->ssnGuard->exclusionSql('s.`ssn_hash`') : '';
+
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
@@ -450,6 +468,7 @@ class SqlBackfill
                  WHERE s.system_id = ? AND s.`$col` IS NOT NULL
                    AND l.link_id IS NULL     -- not yet linked (anti-join)
                    AND gi.k IS NULL          -- no active identity has this key yet (anti-join)
+                   $guard
                  GROUP BY s.`$col`
              ) f ON f.mid = r.stg_person_id",
             [$this->systemId]
@@ -459,6 +478,9 @@ class SqlBackfill
     /** Link every unlinked row whose $col matches an active identity. */
     private function tierLink(string $col, string $keyName): void
     {
+        // Same filler screen as tierCreate — see there.
+        $guard = $col === 'ssn_hash' ? $this->ssnGuard->exclusionSql('s.`ssn_hash`') : '';
+
         $this->hub()->statement(
             "INSERT INTO gp_source_link
                 (identity_id, system_id, source_table, source_id, account_id, employeelist_id,
@@ -469,6 +491,7 @@ class SqlBackfill
              JOIN (SELECT `$col` k, MIN(identity_id) identity_id FROM gp_identity
                    WHERE status='active' AND `$col` IS NOT NULL GROUP BY `$col`) i ON i.k = s.`$col`
              WHERE s.system_id = ? AND s.`$col` IS NOT NULL
+               $guard
                AND NOT EXISTS (SELECT 1 FROM gp_source_link l
                     WHERE l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id)",
             [$keyName, $this->systemId]
@@ -490,15 +513,15 @@ class SqlBackfill
                  FROM stg_person s
                  LEFT JOIN gp_source_link l
                    ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
-                 LEFT JOIN (SELECT LOWER(canonical_last) l, LOWER(canonical_first) f, canonical_dob d
+                 LEFT JOIN (SELECT canonical_last l, canonical_first f, canonical_dob d
                             FROM gp_identity WHERE status='active'
                               AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
-                            GROUP BY LOWER(canonical_last), LOWER(canonical_first), canonical_dob) gi
-                   ON gi.l=LOWER(s.last_name) AND gi.f=LOWER(s.first_name) AND gi.d=s.date_of_birth
+                            GROUP BY canonical_last, canonical_first, canonical_dob) gi
+                   ON gi.l=s.last_name AND gi.f=s.first_name AND gi.d=s.date_of_birth
                  WHERE s.system_id = ? AND s.last_name IS NOT NULL AND s.first_name IS NOT NULL AND s.date_of_birth IS NOT NULL
                    AND l.link_id IS NULL     -- not yet linked (anti-join)
                    AND gi.l IS NULL          -- no active identity with this name+dob yet (anti-join)
-                 GROUP BY LOWER(s.last_name), LOWER(s.first_name), s.date_of_birth
+                 GROUP BY s.last_name, s.first_name, s.date_of_birth
              ) f ON f.mid = r.stg_person_id",
             [$this->systemId]
         );
@@ -510,10 +533,10 @@ class SqlBackfill
              SELECT i.identity_id, s.system_id, s.source_table, s.source_id, s.account_id, s.employeelist_id,
                  'deterministic', 'name_dob', 0.95, 'auto_match', 0, NOW()
              FROM stg_person s
-             JOIN (SELECT LOWER(canonical_last) l, LOWER(canonical_first) f, canonical_dob d, MIN(identity_id) identity_id
+             JOIN (SELECT canonical_last l, canonical_first f, canonical_dob d, MIN(identity_id) identity_id
                    FROM gp_identity WHERE status='active' AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
-                   GROUP BY LOWER(canonical_last), LOWER(canonical_first), canonical_dob) i
-                  ON i.l=LOWER(s.last_name) AND i.f=LOWER(s.first_name) AND i.d=s.date_of_birth
+                   GROUP BY canonical_last, canonical_first, canonical_dob) i
+                  ON i.l=s.last_name AND i.f=s.first_name AND i.d=s.date_of_birth
              WHERE s.system_id = ?
                AND NOT EXISTS (SELECT 1 FROM gp_source_link l
                     WHERE l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id)",

@@ -102,6 +102,9 @@ return [
             'engine' => 'InnoDB',
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 Mysql::ATTR_SSL_CA => env('GP_MYSQL_ATTR_SSL_CA'),
+                // Cap the connect wait so an unreachable hub surfaces as an error
+                // instead of an ~8s hang on every request that touches it.
+                \PDO::ATTR_TIMEOUT => (int) env('GP_DB_CONNECT_TIMEOUT', 3),
             ]) : [],
         ],
 
@@ -123,6 +126,9 @@ return [
             'engine' => null,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 Mysql::ATTR_SSL_CA => env('SRC_MYSQL_ATTR_SSL_CA'),
+                // See the golden_profile note above. Also bounds SsnHasher's key
+                // lookup, which every credential-search with an ssn hits.
+                \PDO::ATTR_TIMEOUT => (int) env('SRC_DB_CONNECT_TIMEOUT', 3),
             ]) : [],
         ],
 

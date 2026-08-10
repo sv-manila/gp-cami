@@ -4,6 +4,7 @@ namespace App\GoldenProfile\Resolution;
 
 use App\GoldenProfile\Support\NameMatcher;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Pass B — probabilistic resolution (GPP three-pass matcher, pass 2/3 rule layer).
@@ -20,9 +21,48 @@ class ProbabilisticResolver
 {
     private array $cfg;
 
+    private static bool $warnedUnreachable = false;
+
     public function __construct(private int $systemId)
     {
         $this->cfg = config('golden_profile.probabilistic');
+        $this->warnIfAutoMergeUnreachable();
+    }
+
+    /**
+     * score() can only ever add the weights it actually implements. If those sum at
+     * or below auto_merge_at, 'auto_match' is unreachable in practice — every Pass B
+     * hit lands in the review band at best — which is worth a log line rather than
+     * silently behaving as though the configured band were in effect.
+     */
+    private function warnIfAutoMergeUnreachable(): void
+    {
+        if (self::$warnedUnreachable) {
+            return;
+        }
+        self::$warnedUnreachable = true;
+
+        $implemented = (array) ($this->cfg['implemented_weights'] ?? []);
+        if ($implemented === []) {
+            return;
+        }
+
+        $reachable = array_sum(array_intersect_key($this->cfg['weights'] ?? [], array_flip($implemented)));
+        $threshold = (float) ($this->cfg['auto_merge_at'] ?? 1.0);
+
+        // <=, not <. Equality is the case that actually bites: the implemented
+        // weights sum to exactly auto_merge_at (0.92), so auto_match is reachable
+        // only on a flawless score across every signal at once. A strict < treated
+        // that knife-edge as healthy and logged nothing.
+        if (round($reachable, 4) <= $threshold) {
+            Log::warning('probabilistic auto_merge is unreachable with the implemented signals', [
+                'max_reachable_score' => round($reachable, 4),
+                'auto_merge_at' => $threshold,
+                'declared_but_unimplemented' => array_values(
+                    array_diff(array_keys($this->cfg['weights'] ?? []), $implemented)
+                ),
+            ]);
+        }
     }
 
     private function hub()
