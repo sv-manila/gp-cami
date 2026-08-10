@@ -10,6 +10,13 @@ use Illuminate\Support\Facades\DB;
  */
 class ProfileMaterializer
 {
+    private AliasIndexer $aliasIndexer;
+
+    public function __construct(?AliasIndexer $aliasIndexer = null)
+    {
+        $this->aliasIndexer = $aliasIndexer ?? new AliasIndexer;
+    }
+
     private function hub()
     {
         return DB::connection('golden_profile');
@@ -35,6 +42,12 @@ class ProfileMaterializer
         ])->values();
 
         $stgIds = $this->stagedPersonIds($links);
+
+        // The searchable alias index is refreshed alongside the JSON rollup below.
+        // Keeping the two writes together is the whole point: identity-search reads
+        // gp_identity_alias, so if only the JSON were updated the index would drift
+        // and the endpoint would answer from stale aliases.
+        $this->aliasIndexer->refresh($identityId);
 
         // aliases across all linked staged persons
         $aliases = $stgIds->isEmpty() ? collect() : $hub->table('stg_person_alias')

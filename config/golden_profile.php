@@ -171,6 +171,23 @@ return [
     ],
 
     /*
+    | REST API — response shaping.
+    */
+    'api' => [
+        // JSON rollup columns on gp_identity_profile. A row here is unbounded:
+        // identity 3 carries a 69MB credentials blob and a 38MB exclusions blob,
+        // enough to exhaust PHP's memory_limit while hydrating a single result.
+        'json_columns' => [
+            'identifiers', 'addresses', 'licenses', 'credentials', 'exclusions',
+            'accounts', 'aliases', 'source_records', 'resolutions',
+        ],
+        // Any of those columns larger than this is omitted from the response and
+        // named in meta.omitted_fields, so a caller can tell a genuinely empty
+        // list apart from one that was withheld.
+        'max_json_bytes' => 2097152,   // 2MB
+    ],
+
+    /*
     | REST API — credential-search qualifying status filter.
     | Codes mirror MatchSummaryStatus (streamlineverify/sv). Confirm the live
     | set before Phase 9; sv package is added at Phase 9, not Phase 0.

@@ -38,6 +38,13 @@ class SetFinalizer
         'ssn_hash' => 'ssn_hash',
     ];
 
+    private AliasIndexer $aliasIndexer;
+
+    public function __construct(?AliasIndexer $aliasIndexer = null)
+    {
+        $this->aliasIndexer = $aliasIndexer ?? new AliasIndexer;
+    }
+
     private function hub()
     {
         return DB::connection('golden_profile');
@@ -222,6 +229,14 @@ class SetFinalizer
         for ($lo = $min; $lo <= $max; $lo += self::MATERIALIZE_CHUNK) {
             $hi = $lo + self::MATERIALIZE_CHUNK;   // exclusive upper bound
             $done += $this->materializeRange($lo, $hi);
+
+            // The searchable alias index is rebuilt for the same slice, in the same
+            // pass. identity-search reads gp_identity_alias rather than the aliases
+            // JSON, so a materialize that refreshed only the JSON would leave the
+            // endpoint answering from stale aliases. Same range bounds, so an
+            // interrupted run resumes both consistently.
+            $this->aliasIndexer->rebuildAll($lo, $hi - 1);
+
             if ($progress) {
                 $progress($lo, $hi, $done);
             }
