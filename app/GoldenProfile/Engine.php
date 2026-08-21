@@ -6,6 +6,7 @@ use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Materialize\ProfileMaterializer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
+use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -29,6 +30,8 @@ class Engine
 
     private Survivorship $survivorship;
 
+    private SsnHashGuard $ssnGuard;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
@@ -36,6 +39,7 @@ class Engine
         $this->resolver = new DeterministicResolver($this->systemId);
         $this->materializer = new ProfileMaterializer;
         $this->survivorship = new Survivorship;
+        $this->ssnGuard = new SsnHashGuard;
     }
 
     /** Per affected identity: recompute survivorship winners, then rebuild the profile. */
@@ -60,10 +64,12 @@ class Engine
     private function ensureSystem(): int
     {
         $hub = DB::connection('golden_profile');
-        $hub->table('gp_source_system')->updateOrInsert(
-            ['system_code' => self::SYSTEM_CODE],
-            ['display_name' => 'StreamlineVerify local', 'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now()],
-        );
+        // insertOrIgnore is atomic — parallel finalize shards constructing this
+        // class concurrently won't collide on the system_code unique key.
+        $hub->table('gp_source_system')->insertOrIgnore([
+            'system_code' => self::SYSTEM_CODE, 'display_name' => 'StreamlineVerify local',
+            'reliability_rank' => 50, 'is_active' => 1, 'added_at' => now(),
+        ]);
 
         return (int) $hub->table('gp_source_system')->where('system_code', self::SYSTEM_CODE)->value('system_id');
     }
@@ -228,6 +234,17 @@ class Engine
     }
 
     /**
+     * Set-based whole-hub finalize — same result as finalizeAll but produced
+     * with a fixed handful of INSERT…SELECT/UPDATE…JOIN statements instead of
+     * ~25 hub round-trips per identity. Use for bulk backfill; keep finalizeAll
+     * (or finalize()) for the incremental per-identity path. Requires MySQL 8.
+     */
+    public function finalizeAllSet(?callable $log = null): void
+    {
+        (new \App\GoldenProfile\Materialize\SetFinalizer)->run($log);
+    }
+
+    /**
      * Consolidate identities that share a deterministic key — ssn_hash, npi,
      * upin, dea_number, license (number+state+board), or name+dob. Parallel
      * id-partitioned loading can mint separate identities for the same person
@@ -257,6 +274,7 @@ class Engine
                 $round += $this->mergeByColumn($col, $shard, $shards);
             }
             $round += $this->mergeByLicense($shard, $shards);
+            $round += $this->mergeByIdentifier($shard, $shards);
             $round += $this->mergeByNameDob($shard, $shards);
             $merged += $round;
             if ($progress) {
@@ -283,6 +301,12 @@ class Engine
         $q = $this->shardFilter($q, $col, $shard, $shards);
         $dupVals = $q->groupBy($col)->havingRaw('COUNT(*) > 1')->pluck($col);
         foreach ($dupVals as $val) {
+            // A filler ssn_hash is not evidence of shared identity. Resolution now
+            // refuses to bind on one, but dedup would still fold together any
+            // identities that already carry it — so screen here too.
+            if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($val)) {
+                continue;
+            }
             $ids = $hub->table('gp_identity')
                 ->where($col, $val)->where('status', 'active')
                 ->orderBy('identity_id')->pluck('identity_id')->all();
@@ -326,23 +350,67 @@ class Engine
         return $n;
     }
 
+    /** Merge active identities sharing a multi-valued identifier (DEA, MMIS). */
+    private function mergeByIdentifier(int $shard = 0, int $shards = 1): int
+    {
+        $hub = $this->hub();
+        $n = 0;
+        $q = $hub->table('gp_identity_identifier as gii')
+            ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+            ->where('gi.status', 'active')
+            ->select('gii.id_type', 'gii.id_value');
+        $q = $this->shardFilter($q, "CONCAT_WS('|',gii.id_type,gii.id_value)", $shard, $shards);
+        $groups = $q->groupBy('gii.id_type', 'gii.id_value')
+            ->havingRaw('COUNT(DISTINCT gii.identity_id) > 1')->get();
+        foreach ($groups as $g) {
+            $ids = $hub->table('gp_identity_identifier as gii')
+                ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+                ->where('gi.status', 'active')
+                ->where('gii.id_type', $g->id_type)->where('gii.id_value', $g->id_value)
+                ->orderBy('gii.identity_id')->distinct()->pluck('gii.identity_id')->all();
+            $survivor = (int) array_shift($ids);
+            foreach ($ids as $loser) {
+                $n += $this->mergeIdentity($survivor, (int) $loser);
+            }
+        }
+
+        return $n;
+    }
+
     /** Merge active identities sharing canonical first + last + dob (resolver's name_dob tier). */
     private function mergeByNameDob(int $shard = 0, int $shards = 1): int
     {
         $hub = $this->hub();
         $n = 0;
+        // No LOWER() anywhere: canonical_first/canonical_last are utf8mb4_unicode_ci
+        // so grouping and comparing are already case-insensitive, and canonical_dob
+        // is a DATE. Wrapping them made the per-group probe below non-sargable —
+        // the same defect documented in DeterministicResolver::matchDeterministic()
+        // that pinned sync at ~0.03 rows/sec, one probe per duplicate group.
         $q = $hub->table('gp_identity')
             ->where('status', 'active')
             ->whereNotNull('canonical_first')->whereNotNull('canonical_last')->whereNotNull('canonical_dob')
-            ->selectRaw('LOWER(canonical_first) f, LOWER(canonical_last) l, canonical_dob d');
+            ->select('canonical_first as f', 'canonical_last as l', 'canonical_dob as d');
+        // The shard expression KEEPS LOWER(), unlike the probe below. Two reasons,
+        // both correctness rather than style:
+        //   1. CRC32 hashes raw bytes, but the GROUP BY above is case-insensitive
+        //      (utf8mb4_unicode_ci). Hashing the unfolded value would put "Smith"
+        //      and "SMITH" — one group — in different shards, so a sharded run
+        //      could process a group twice or, worse, split it and merge neither
+        //      half completely.
+        //   2. It keeps the shard partition byte-identical to previous releases,
+        //      so a sharded dedup interrupted before this change and resumed after
+        //      it does not silently skip the rows that changed shard.
+        // Only the per-group probe needed to become sargable; this expression is
+        // evaluated once per row of an aggregate that scans regardless.
         $q = $this->shardFilter($q, "CONCAT_WS('|',LOWER(canonical_last),LOWER(canonical_first),canonical_dob)", $shard, $shards);
         $groups = $q->groupBy('f', 'l', 'd')->havingRaw('COUNT(*) > 1')->get();
         foreach ($groups as $g) {
             $ids = $hub->table('gp_identity')
                 ->where('status', 'active')
-                ->whereRaw('LOWER(canonical_first) = ?', [$g->f])
-                ->whereRaw('LOWER(canonical_last) = ?', [$g->l])
-                ->whereDate('canonical_dob', $g->d)
+                ->where('canonical_last', $g->l)
+                ->where('canonical_first', $g->f)
+                ->where('canonical_dob', $g->d)
                 ->orderBy('identity_id')->pluck('identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
@@ -414,6 +482,8 @@ class Engine
             ['license_number', 'certification_state', 'certification_board']);
         $this->repointDeduped('gp_address', 'address_id', $survivor, $loser,
             ['address1', 'city', 'state', 'zip']);
+        $this->repointDeduped('gp_identity_identifier', 'id', $survivor, $loser,
+            ['id_type', 'id_value']);
 
         // Rebuilt from scratch by finalize — just remove the loser's copies.
         foreach (['gp_attribute', 'gp_survivorship_audit', 'gp_identity_profile'] as $t) {

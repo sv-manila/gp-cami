@@ -10,6 +10,13 @@ use Illuminate\Support\Facades\DB;
  */
 class ProfileMaterializer
 {
+    private AliasIndexer $aliasIndexer;
+
+    public function __construct(?AliasIndexer $aliasIndexer = null)
+    {
+        $this->aliasIndexer = $aliasIndexer ?? new AliasIndexer;
+    }
+
     private function hub()
     {
         return DB::connection('golden_profile');
@@ -36,6 +43,12 @@ class ProfileMaterializer
 
         $stgIds = $this->stagedPersonIds($links);
 
+        // The searchable alias index is refreshed alongside the JSON rollup below.
+        // Keeping the two writes together is the whole point: identity-search reads
+        // gp_identity_alias, so if only the JSON were updated the index would drift
+        // and the endpoint would answer from stale aliases.
+        $this->aliasIndexer->refresh($identityId);
+
         // aliases across all linked staged persons
         $aliases = $stgIds->isEmpty() ? collect() : $hub->table('stg_person_alias')
             ->whereIn('stg_person_id', $stgIds)
@@ -49,6 +62,12 @@ class ProfileMaterializer
                 'board' => $l->certification_board, 'type' => $l->license_type,
                 'registry' => $l->registry, 'verified' => (bool) $l->is_verified,
             ])->values();
+
+        $identifiers = $hub->table('gp_identity_identifier')->where('identity_id', $identityId)->get()
+            ->map(fn ($r) => ['type' => $r->id_type, 'value' => $r->id_value])
+            ->unique(fn ($r) => $r['type'].'|'.$r['value'])->values();
+        // Fall back the profile's dea_number column to a DEA identifier for display.
+        $deaFromIdentifier = $identifiers->firstWhere('type', 'dea')['value'] ?? null;
 
         $addresses = $hub->table('gp_address')->where('identity_id', $identityId)->get();
         $primary = $addresses->firstWhere('is_primary', 1) ?? $addresses->first();
@@ -109,7 +128,9 @@ class ProfileMaterializer
                 'ssn_last_four' => $this->ssnLastFour($stgIds),
                 'npi' => $identity->npi,
                 'upin' => $identity->upin,
-                'dea_number' => $identity->dea_number,
+                'dea_number' => $identity->dea_number ?: $deaFromIdentifier,
+                'identifier_count' => $identifiers->count(),
+                'identifiers' => $identifiers->toJson(),
                 'address1' => $primary->address1 ?? null,
                 'city' => $primary->city ?? null,
                 'state' => $primary->state ?? null,

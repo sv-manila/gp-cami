@@ -36,10 +36,12 @@ class StreamlineLocalConnector
      * critical when the source is a high-latency (WAN) connection. When null,
      * falls back to a per-row source lookup.
      */
-    public function ingest(object $emp, ?array $accountMap = null): int
+    /**
+     * Map an employee row to the canonical stg_person shape (no DB write).
+     * Shared by per-row ingest() and the set-based batch stager.
+     */
+    public function personRow(object $emp, ?array $accountMap = null): array
     {
-        $now = now();
-
         $accountId = null;
         if ($emp->employeelist_id) {
             $accountId = $accountMap !== null
@@ -49,9 +51,8 @@ class StreamlineLocalConnector
         }
 
         $npi = (int) ($emp->npi ?? 0);
-        $blockKey = $this->blockKey($emp->last_name, $emp->date_of_birth);
 
-        $row = [
+        return [
             'system_id' => $this->systemId,
             'source_table' => self::SOURCE_TABLE,
             'source_id' => $emp->id,
@@ -72,9 +73,14 @@ class StreamlineLocalConnector
             'zip' => $this->clean($emp->zip),
             'terminated' => (int) ($emp->terminated ?? 0),
             'source_modified' => $this->date($emp->date_modified, true),
-            'ingested_at' => $now,
-            'block_key' => $blockKey,
+            'ingested_at' => now(),
+            'block_key' => $this->blockKey($emp->last_name, $emp->date_of_birth),
         ];
+    }
+
+    public function ingest(object $emp, ?array $accountMap = null): int
+    {
+        $row = $this->personRow($emp, $accountMap);
 
         // Select-first instead of updateOrInsert: on a fresh load the common
         // path is a brand-new row, and knowing it's new lets us skip the three
@@ -106,7 +112,23 @@ class StreamlineLocalConnector
             $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
         }
 
-        // ---- aliases ----
+        $c = $this->childRows($emp);
+        foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses', 'stg_person_license' => 'licenses'] as $table => $bucket) {
+            if ($c[$bucket]) {
+                $hub->table($table)->insert(array_map(
+                    fn ($r) => $r + ['stg_person_id' => $stgId], $c[$bucket]
+                ));
+            }
+        }
+    }
+
+    /**
+     * Map an employee's alt_* columns to flattened alias/address/license child
+     * rows (no stg_person_id, no DB write). Shared by ingest() and the batch
+     * stager. Returns ['aliases'=>[], 'addresses'=>[], 'licenses'=>[]].
+     */
+    public function childRows(object $emp): array
+    {
         $aliases = [];
         $addAlias = function ($type, $first, $last) use (&$aliases) {
             $first = $this->clean($first);
@@ -125,13 +147,7 @@ class StreamlineLocalConnector
         $addAlias('business', $emp->business ?? null, null);
         $addAlias('business', $emp->alt_business1 ?? null, null);
         $addAlias('business', $emp->alt_business2 ?? null, null);
-        if ($aliases) {
-            $hub->table('stg_person_alias')->insert(array_map(
-                fn ($a) => $a + ['stg_person_id' => $stgId], $aliases
-            ));
-        }
 
-        // ---- addresses ----
         $addresses = [];
         if ($this->clean($emp->address1) || $this->clean($emp->city)) {
             $addresses[] = [
@@ -147,13 +163,7 @@ class StreamlineLocalConnector
                 'city' => $this->clean($emp->alt_city_1 ?? null), 'state' => $this->clean($emp->alt_state_1 ?? null), 'zip' => $this->clean($emp->alt_zip_1 ?? null),
             ];
         }
-        if ($addresses) {
-            $hub->table('stg_person_address')->insert(array_map(
-                fn ($a) => $a + ['stg_person_id' => $stgId], $addresses
-            ));
-        }
 
-        // ---- licenses (primary + alt) ----
         $licenses = [];
         $addLic = function ($num, $state, $board, $type, $typeId, $primary) use (&$licenses) {
             $num = $this->clean($num);
@@ -171,11 +181,74 @@ class StreamlineLocalConnector
         };
         $addLic($emp->certification_number ?? null, $emp->certification_state ?? null, $emp->certification_board ?? null, $emp->license_type ?? null, $emp->license_type_id ?? null, 1);
         $addLic($emp->alt_certification_number ?? null, $emp->alt_certification_state ?? null, $emp->alt_certification_board ?? null, $emp->alt_license_type ?? null, $emp->alt_license_type_id ?? null, 0);
-        if ($licenses) {
-            $hub->table('stg_person_license')->insert(array_map(
-                fn ($l) => $l + ['stg_person_id' => $stgId], $licenses
-            ));
+
+        return ['aliases' => $aliases, 'addresses' => $addresses, 'licenses' => $licenses];
+    }
+
+    /**
+     * Pivot an employee's employee_additional_info rows (EAV: name => value)
+     * into: multi-valued identifiers (DEA, MMIS — match keys), extra licenses
+     * (CSL + alt cert/csl licenses), and business-name aliases.
+     *
+     * @param  iterable  $aiRows  rows with ->name / ->value (or [name][value])
+     * @return array{identifiers:array,licenses:array,aliases:array}
+     */
+    public function additionalRows(iterable $aiRows): array
+    {
+        $v = [];
+        foreach ($aiRows as $r) {
+            $name = is_array($r) ? ($r['name'] ?? null) : ($r->name ?? null);
+            $val = is_array($r) ? ($r['value'] ?? null) : ($r->value ?? null);
+            $val = $this->clean($val);
+            if ($name !== null && $val !== null) {
+                $v[$name] = $val;
+            }
         }
+
+        $identifiers = [];
+        // DEA (match key) — primary + alt + per-alt-license DEAs.
+        foreach (['dea_number', 'alt_dea_number', 'alt_license_dea_number_2', 'alt_license_dea_number_3',
+            'alt_license_dea_number_4', 'alt_license_dea_number_5', 'alt_license_dea_number_6'] as $k) {
+            if (! empty($v[$k])) {
+                $identifiers[] = ['id_type' => 'dea', 'id_value' => $v[$k]];
+            }
+        }
+        // MMIS (match key).
+        if (! empty($v['mmis_number'])) {
+            $identifiers[] = ['id_type' => 'mmis', 'id_value' => $v['mmis_number']];
+        }
+
+        $licenses = [];
+        $addLic = function ($num, $state, $board, $type, $registry) use (&$licenses) {
+            $num = $this->clean($num);
+            if ($num) {
+                $licenses[] = [
+                    'license_number' => $num, 'certification_state' => $this->clean($state),
+                    'certification_board' => $this->clean($board), 'license_type' => $this->clean($type),
+                    'license_type_id' => null, 'registry' => $registry, 'is_primary' => 0,
+                ];
+            }
+        };
+        // CSL licenses (primary + alt).
+        $addLic($v['csl_number'] ?? null, $v['csl_state'] ?? null, null, 'CSL', 'CSL');
+        $addLic($v['alt_csl_number'] ?? null, $v['alt_csl_state'] ?? null, null, 'CSL', 'CSL');
+        // Alt license sets (2..6): a cert license and a CSL license each.
+        for ($i = 2; $i <= 6; $i++) {
+            $addLic($v["alt_license_cert_number_$i"] ?? null, $v["alt_license_cert_state_$i"] ?? null,
+                $v["alt_license_cert_board_$i"] ?? null, $v["alt_license_type_$i"] ?? null, null);
+            $addLic($v["alt_license_csl_number_$i"] ?? null, $v["alt_license_csl_state_$i"] ?? null,
+                null, 'CSL', 'CSL');
+        }
+
+        // Business-name aliases (alt_business3..9; 1-2 already come from employees).
+        $aliases = [];
+        for ($i = 3; $i <= 9; $i++) {
+            if (! empty($v["alt_business$i"])) {
+                $aliases[] = ['alias_type' => 'business', 'first_name' => $v["alt_business$i"], 'last_name' => null];
+            }
+        }
+
+        return ['identifiers' => $identifiers, 'licenses' => $licenses, 'aliases' => $aliases];
     }
 
     private function blockKey(?string $last, ?string $dob): ?string

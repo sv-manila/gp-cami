@@ -2,6 +2,7 @@
 
 namespace App\GoldenProfile\Resolution;
 
+use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -14,9 +15,26 @@ class DeterministicResolver
 {
     private ProbabilisticResolver $probabilistic;
 
+    private SsnHashGuard $ssnGuard;
+
+    /** Bind confidence per key, from config instead of literals. */
+    private array $keyConfidence;
+
     public function __construct(private int $systemId)
     {
         $this->probabilistic = new ProbabilisticResolver($systemId);
+        $this->ssnGuard = new SsnHashGuard;
+        $this->keyConfidence = config('golden_profile.deterministic_keys', []);
+    }
+
+    /**
+     * Bind confidence for a deterministic key. Previously these were hardcoded
+     * literals, which silently ignored config('golden_profile.deterministic_keys')
+     * — tuning the config changed nothing.
+     */
+    private function confidence(string $configKey, float $fallback): float
+    {
+        return (float) ($this->keyConfidence[$configKey] ?? $fallback);
     }
 
     private function hub()
@@ -102,28 +120,42 @@ class DeterministicResolver
     {
         $hub = $this->hub();
 
-        if ($p->ssn_hash) {
-            $id = $hub->table('gp_identity')->where('ssn_hash', $p->ssn_hash)->where('status', 'active')->value('identity_id');
+        // Every tier below adds orderBy('identity_id') before ->value(). Without it
+        // the winner among several rows sharing a key is whatever storage order
+        // returns, so the same source row could bind to different identities across
+        // runs — and dedup()'s own docs acknowledge multiple active identities can
+        // share a key before dedup runs. The set-based backfill already pins
+        // MIN(identity_id); this makes the per-row path agree with it.
+        //
+        // ssn_hash is additionally screened for filler values: a shared placeholder
+        // SSN would otherwise collapse every person carrying it into one identity
+        // at 0.99 confidence with no name or DOB cross-check. See SsnHashGuard.
+        if ($p->ssn_hash && ! $this->ssnGuard->isBlocked($p->ssn_hash)) {
+            $id = $hub->table('gp_identity')->where('ssn_hash', $p->ssn_hash)->where('status', 'active')
+                ->orderBy('identity_id')->value('identity_id');
             if ($id) {
-                return [(int) $id, 'ssn_hash', 0.99];
+                return [(int) $id, 'ssn_hash', $this->confidence('ssn_hash', 0.99)];
             }
         }
         if ($p->npi) {
-            $id = $hub->table('gp_identity')->where('npi', $p->npi)->where('status', 'active')->value('identity_id');
+            $id = $hub->table('gp_identity')->where('npi', $p->npi)->where('status', 'active')
+                ->orderBy('identity_id')->value('identity_id');
             if ($id) {
-                return [(int) $id, 'npi', 0.99];
+                return [(int) $id, 'npi', $this->confidence('npi', 0.99)];
             }
         }
         if ($p->dea_number) {
-            $id = $hub->table('gp_identity')->where('dea_number', $p->dea_number)->where('status', 'active')->value('identity_id');
+            $id = $hub->table('gp_identity')->where('dea_number', $p->dea_number)->where('status', 'active')
+                ->orderBy('identity_id')->value('identity_id');
             if ($id) {
-                return [(int) $id, 'dea_number', 0.99];
+                return [(int) $id, 'dea_number', $this->confidence('dea_number', 0.99)];
             }
         }
         if ($p->upin) {
-            $id = $hub->table('gp_identity')->where('upin', $p->upin)->where('status', 'active')->value('identity_id');
+            $id = $hub->table('gp_identity')->where('upin', $p->upin)->where('status', 'active')
+                ->orderBy('identity_id')->value('identity_id');
             if ($id) {
-                return [(int) $id, 'upin', 0.99];
+                return [(int) $id, 'upin', $this->confidence('upin', 0.99)];
             }
         }
         // license_number + certification_state (any of the person's licenses)
@@ -137,21 +169,28 @@ class DeterministicResolver
             } else {
                 $q->whereNull('l.certification_state');
             }
-            $id = $q->value('l.identity_id');
+            $id = $q->orderBy('l.identity_id')->value('l.identity_id');
             if ($id) {
-                return [(int) $id, 'license_registry', 0.99];
+                return [(int) $id, 'license_registry', $this->confidence('license_number+certification_state', 0.99)];
             }
         }
-        // name + dob (lower confidence)
+        // name + dob (lower confidence).
+        // Plain column comparisons on purpose: the name columns are
+        // utf8mb4_unicode_ci (already case-insensitive) and canonical_dob is a
+        // DATE, so LOWER()/whereDate() only served to make the predicate
+        // non-sargable — idx_name_dob (canonical_last, canonical_first,
+        // canonical_dob) was skipped and every probe scanned ~6.5M rows
+        // (EXPLAIN: type=ref key=idx_status rows=6475711 vs key=idx_name_dob rows=1),
+        // which pinned incremental sync at ~0.03 rows/sec.
         if ($p->last_name && $p->first_name && $p->date_of_birth) {
             $id = $hub->table('gp_identity')
                 ->where('status', 'active')
-                ->whereRaw('LOWER(canonical_last) = ?', [mb_strtolower($p->last_name)])
-                ->whereRaw('LOWER(canonical_first) = ?', [mb_strtolower($p->first_name)])
-                ->whereDate('canonical_dob', $p->date_of_birth)
-                ->value('identity_id');
+                ->where('canonical_last', $p->last_name)
+                ->where('canonical_first', $p->first_name)
+                ->where('canonical_dob', $p->date_of_birth)
+                ->orderBy('identity_id')->value('identity_id');
             if ($id) {
-                return [(int) $id, 'name_dob', 0.95];
+                return [(int) $id, 'name_dob', $this->confidence('name+dob', 0.95)];
             }
         }
 
@@ -202,6 +241,12 @@ class DeterministicResolver
         foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob'] as $col) {
             $srcCol = $col === 'canonical_dob' ? 'date_of_birth' : $col;
             if (empty($id->$col) && ! empty($p->$srcCol)) {
+                // Never promote a filler ssn_hash onto an identity that lacks one:
+                // it would spread the placeholder across more identities and hand
+                // later rows a bogus 0.99 key to match on.
+                if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($p->$srcCol)) {
+                    continue;
+                }
                 $upd[$col] = $p->$srcCol;
             }
         }

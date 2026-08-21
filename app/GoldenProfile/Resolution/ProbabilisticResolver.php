@@ -4,6 +4,7 @@ namespace App\GoldenProfile\Resolution;
 
 use App\GoldenProfile\Support\NameMatcher;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Pass B — probabilistic resolution (GPP three-pass matcher, pass 2/3 rule layer).
@@ -20,9 +21,48 @@ class ProbabilisticResolver
 {
     private array $cfg;
 
+    private static bool $warnedUnreachable = false;
+
     public function __construct(private int $systemId)
     {
         $this->cfg = config('golden_profile.probabilistic');
+        $this->warnIfAutoMergeUnreachable();
+    }
+
+    /**
+     * score() can only ever add the weights it actually implements. If those sum at
+     * or below auto_merge_at, 'auto_match' is unreachable in practice — every Pass B
+     * hit lands in the review band at best — which is worth a log line rather than
+     * silently behaving as though the configured band were in effect.
+     */
+    private function warnIfAutoMergeUnreachable(): void
+    {
+        if (self::$warnedUnreachable) {
+            return;
+        }
+        self::$warnedUnreachable = true;
+
+        $implemented = (array) ($this->cfg['implemented_weights'] ?? []);
+        if ($implemented === []) {
+            return;
+        }
+
+        $reachable = array_sum(array_intersect_key($this->cfg['weights'] ?? [], array_flip($implemented)));
+        $threshold = (float) ($this->cfg['auto_merge_at'] ?? 1.0);
+
+        // <=, not <. Equality is the case that actually bites: the implemented
+        // weights sum to exactly auto_merge_at (0.92), so auto_match is reachable
+        // only on a flawless score across every signal at once. A strict < treated
+        // that knife-edge as healthy and logged nothing.
+        if (round($reachable, 4) <= $threshold) {
+            Log::warning('probabilistic auto_merge is unreachable with the implemented signals', [
+                'max_reachable_score' => round($reachable, 4),
+                'auto_merge_at' => $threshold,
+                'declared_but_unimplemented' => array_values(
+                    array_diff(array_keys($this->cfg['weights'] ?? []), $implemented)
+                ),
+            ]);
+        }
     }
 
     private function hub()
@@ -35,6 +75,21 @@ class ProbabilisticResolver
     {
         if (! $p->block_key) {
             return [null, 0.0, 'no_match'];
+        }
+
+        // Oversized blocks carry no evidence. block_key is surname-soundex + DOB,
+        // and rows with no DOB collapse into buckets like "D500|____" holding
+        // 107,164 people — that is "surname sounds like D-500", not a candidate
+        // set. Scoring one costs ~30s per source row and cannot produce a
+        // defensible match, so the block_size_cap is enforced here: over the cap,
+        // Pass B declines and the caller mints a new identity.
+        $cap = (int) ($this->cfg['block_size_cap'] ?? 0);
+        if ($cap > 0) {
+            $blockSize = (int) $this->hub()->table('stg_person')
+                ->where('block_key', $p->block_key)->count();
+            if ($blockSize > $cap) {
+                return [null, 0.0, 'no_match'];
+            }
         }
 
         $candidateIds = $this->hub()->table('gp_source_link as l')
@@ -51,9 +106,22 @@ class ProbabilisticResolver
 
         $best = null;
         $bestScore = 0.0;
-        foreach ($candidateIds as $cid) {
-            $identity = $this->hub()->table('gp_identity')->where('identity_id', $cid)->first();
-            if (! $identity || $this->hardNo($p, $identity)) {
+
+        // Candidates are loaded in batches, not one query each. A block_key like
+        // "smith|1992-09-21" can hold thousands of members (the seeded test-data
+        // pile-ups run to 12k), and a per-candidate SELECT made every new source
+        // row cost that many round-trips — measured at ~13,500 hub queries per
+        // row, which pinned gp:sync at ~0.03 rows/sec.
+        $identities = collect();
+        foreach ($candidateIds->chunk(1000) as $batch) {
+            $identities = $identities->merge(
+                $this->hub()->table('gp_identity')->whereIn('identity_id', $batch->all())->get()
+            );
+        }
+
+        foreach ($identities as $identity) {
+            $cid = $identity->identity_id;
+            if ($this->hardNo($p, $identity)) {
                 continue;
             }
             // strict name prerequisite (first+last equal, middle/suffix/dob compatible)
