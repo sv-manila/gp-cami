@@ -28,3 +28,6 @@ Thumbs.db
 
 # local-only API token (not committed)
 /storage/cami_token.txt
+
+# subagent-driven-development scratch (briefs, reports, review packages)
+/.superpowers
