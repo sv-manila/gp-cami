@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* records exist to measure what plan 2 (SSN removal) costs — when the tier goes, they become a false split and the recall floor must be re-baselined, not lowered silently.",
+  "records": [
+    { "ref": "smith-a", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": 1234567893 },
+    { "ref": "smith-b", "first_name": "Bob", "last_name": "Smith", "date_of_birth": null, "npi": 1234567893 },
+    { "ref": "smith-c", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": null },
+    { "ref": "smith-other", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1991-12-18", "npi": 1987654327 },
+
+    { "ref": "garcia-a", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1975-01-09", "npi": 1999999992 },
+    { "ref": "garcia-b", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1975-01-09", "npi": null },
+    { "ref": "garcia-other", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1988-06-30", "npi": null },
+
+    { "ref": "kowalski-a", "first_name": "Ann", "last_name": "Kowalski", "date_of_birth": "1981-03-03", "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "NY" }] },
+    { "ref": "kowalski-b", "first_name": "Anne", "last_name": "Kowalski", "date_of_birth": null, "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "NY" }] },
+    { "ref": "kowalski-other", "first_name": "Ann", "last_name": "Kowalski", "date_of_birth": "1990-11-11", "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "CA" }] },
+
+    { "ref": "chain-a", "first_name": "Peter", "last_name": "Nguyen", "date_of_birth": "1968-07-21", "npi": 1112223339 },
+    { "ref": "chain-b", "first_name": "Peter", "last_name": "Nguyen", "date_of_birth": "1968-07-21", "npi": null,
+      "licenses": [{ "license_number": "PN-3312", "certification_state": "TX" }] },
+    { "ref": "chain-c", "first_name": "Pete", "last_name": "Nguyen", "date_of_birth": null, "npi": null,
+      "licenses": [{ "license_number": "PN-3312", "certification_state": "TX" }] },
+
+    { "ref": "nodob-a", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
+    { "ref": "nodob-b", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
+
+    { "ref": "ssn-a", "first_name": "Grace", "last_name": "Adeyemi", "date_of_birth": "1979-05-14", "npi": null,
+      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+    { "ref": "ssn-b", "first_name": "Gracie", "last_name": "Adeyemi", "date_of_birth": null, "npi": null,
+      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+  ],
+  "truth": [
+    ["smith-a", "smith-b", "smith-c"],
+    ["smith-other"],
+    ["garcia-a", "garcia-b"],
+    ["garcia-other"],
+    ["kowalski-a", "kowalski-b"],
+    ["kowalski-other"],
+    ["chain-a", "chain-b", "chain-c"],
+    ["nodob-a"],
+    ["nodob-b"],
+    ["ssn-a", "ssn-b"]
+  ]
+}
