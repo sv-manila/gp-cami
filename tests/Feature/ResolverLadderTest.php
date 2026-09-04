@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\GoldenProfile\Resolution\DeterministicResolver;
 use Tests\Support\HubTestCase;
 
 class ResolverLadderTest extends HubTestCase
@@ -13,5 +14,111 @@ class ResolverLadderTest extends HubTestCase
         $this->assertTrue($schema->hasTable('gp_identity'), 'gp_identity was not created');
         $this->assertTrue($schema->hasTable('stg_person'));
         $this->assertTrue($schema->hasTable('gp_source_link'));
+    }
+
+    private function resolve(int $stgPersonId): int
+    {
+        return (new DeterministicResolver($this->systemId))
+            ->resolve($stgPersonId);
+    }
+
+    public function test_two_rows_sharing_an_npi_bind_to_one_identity(): void
+    {
+        $a = $this->stagePerson(['npi' => 1234567893, 'first_name' => 'Robert']);
+        $b = $this->stagePerson(['npi' => 1234567893, 'first_name' => 'Bob', 'date_of_birth' => null]);
+
+        $this->assertSame($this->resolve($a), $this->resolve($b));
+    }
+
+    public function test_two_rows_sharing_name_and_dob_bind_to_one_identity(): void
+    {
+        $a = $this->stagePerson(['first_name' => 'Maria', 'last_name' => 'Garcia', 'date_of_birth' => '1975-01-09']);
+        $b = $this->stagePerson(['first_name' => 'Maria', 'last_name' => 'Garcia', 'date_of_birth' => '1975-01-09']);
+
+        $this->assertSame($this->resolve($a), $this->resolve($b));
+    }
+
+    public function test_same_name_different_dob_stay_separate(): void
+    {
+        $a = $this->stagePerson(['first_name' => 'Maria', 'last_name' => 'Garcia', 'date_of_birth' => '1975-01-09']);
+        $b = $this->stagePerson(['first_name' => 'Maria', 'last_name' => 'Garcia', 'date_of_birth' => '1988-06-30']);
+
+        $this->assertNotSame($this->resolve($a), $this->resolve($b));
+    }
+
+    public function test_shared_license_and_state_binds_to_one_identity(): void
+    {
+        $a = $this->stagePerson(['first_name' => 'Ann', 'last_name' => 'Kowalski', 'date_of_birth' => '1981-03-03']);
+        $this->stageLicense($a, 'L-77', 'NY');
+        $idA = $this->resolve($a);
+
+        $b = $this->stagePerson(['first_name' => 'Anne', 'last_name' => 'Kowalski', 'date_of_birth' => null]);
+        $this->stageLicense($b, 'L-77', 'NY');
+
+        $this->assertSame($idA, $this->resolve($b));
+    }
+
+    public function test_same_license_number_in_a_different_state_stays_separate(): void
+    {
+        $a = $this->stagePerson(['first_name' => 'Ann', 'last_name' => 'Kowalski', 'date_of_birth' => '1981-03-03']);
+        $this->stageLicense($a, 'L-77', 'NY');
+        $idA = $this->resolve($a);
+
+        $b = $this->stagePerson(['first_name' => 'Ann', 'last_name' => 'Kowalski', 'date_of_birth' => '1990-11-11']);
+        $this->stageLicense($b, 'L-77', 'CA');
+
+        $this->assertNotSame($idA, $this->resolve($b));
+    }
+
+    public function test_resolving_the_same_row_twice_is_idempotent(): void
+    {
+        $a = $this->stagePerson(['npi' => 1234567893]);
+
+        $this->assertSame($this->resolve($a), $this->resolve($a));
+        $this->assertSame(1, $this->hub()->table('gp_source_link')->count());
+    }
+
+    public function test_a_pinned_link_is_never_re_enriched(): void
+    {
+        $a = $this->stagePerson(['first_name' => 'Ann', 'last_name' => 'Kowalski', 'date_of_birth' => '1981-03-03']);
+        $this->stageLicense($a, 'L-77', 'NY');
+        $id = $this->resolve($a);
+
+        $this->hub()->table('gp_source_link')->where('identity_id', $id)->update(['is_pinned' => 1]);
+        $this->hub()->table('gp_license')->delete();
+
+        $this->assertSame($id, $this->resolve($a));
+        $this->assertSame(0, $this->hub()->table('gp_license')->count(), 'a pinned link must not re-enrich');
+    }
+
+    public function test_the_match_key_recorded_matches_the_tier_that_fired(): void
+    {
+        $a = $this->stagePerson(['npi' => 1234567893]);
+        $id = $this->resolve($a);
+        $b = $this->stagePerson(['npi' => 1234567893, 'first_name' => 'Bob', 'date_of_birth' => null]);
+        $this->resolve($b);
+
+        $keys = $this->hub()->table('gp_source_link')->where('identity_id', $id)
+            ->orderBy('link_id')->pluck('match_key')->all();
+
+        $this->assertSame(['new', 'npi'], $keys);
+    }
+
+    public function test_a_filler_ssn_hash_does_not_weld_unrelated_people_together(): void
+    {
+        // config golden_profile.ssn.max_identities_per_hash is 3: a hash carried
+        // by more distinct people than that is filler and must not bind.
+        $refs = [];
+        foreach ([['Ana', 'Reyes', '1980-01-01'], ['Ben', 'Cruz', '1975-02-02'],
+            ['Cara', 'Diaz', '1990-03-03'], ['Dan', 'Evans', '1966-04-04']] as [$f, $l, $d]) {
+            $refs[] = $this->stagePerson([
+                'first_name' => $f, 'last_name' => $l, 'date_of_birth' => $d,
+                'ssn_hash' => str_repeat('a', 128),
+            ]);
+        }
+
+        $ids = array_map(fn ($r) => $this->resolve($r), $refs);
+
+        $this->assertCount(4, array_unique($ids), 'a filler ssn_hash must not collapse four people');
     }
 }
