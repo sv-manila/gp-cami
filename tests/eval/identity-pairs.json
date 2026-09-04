@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* records exist to measure what plan 2 (SSN removal) costs — when the tier goes, they become a false split and the recall floor must be re-baselined, not lowered silently.",
+  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* records exist to measure what plan 2 (SSN removal) costs — when the tier goes, they become a false split and the recall floor must be re-baselined, not lowered silently. The ssn-* hash is a synthetic sha512 with no known preimage, deliberately NOT a filler value — filler SSNs are what SsnHashGuard blocks, and merging on one would be a defect, not a true positive.",
   "records": [
     { "ref": "smith-a", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": 1234567893 },
     { "ref": "smith-b", "first_name": "Bob", "last_name": "Smith", "date_of_birth": null, "npi": 1234567893 },
@@ -28,9 +28,9 @@
     { "ref": "nodob-b", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
 
     { "ref": "ssn-a", "first_name": "Grace", "last_name": "Adeyemi", "date_of_birth": "1979-05-14", "npi": null,
-      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+      "ssn_hash": "3a1cc1e0d0a1b2f7f7bfa5c9c0e5a37f2b8e5f9a4d6c3b1e8f0a2d4c6b8e0f1a3c5e7091b3d5f7092a4c6e8f0b2d4c6e8fa1c3e5079b1d3f5a7c9e1b3d5f70921" },
     { "ref": "ssn-b", "first_name": "Gracie", "last_name": "Adeyemi", "date_of_birth": null, "npi": null,
-      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+      "ssn_hash": "3a1cc1e0d0a1b2f7f7bfa5c9c0e5a37f2b8e5f9a4d6c3b1e8f0a2d4c6b8e0f1a3c5e7091b3d5f7092a4c6e8f0b2d4c6e8fa1c3e5079b1d3f5a7c9e1b3d5f70921" }
   ],
   "truth": [
     ["smith-a", "smith-b", "smith-c"],

@@ -59,4 +59,15 @@ class EvalSetShapeTest extends TestCase
             'truth' => [['x']],
         ], 'memory');
     }
+
+    public function test_a_truth_entry_naming_an_unknown_record_is_rejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("truth references unknown record 'ghost'");
+
+        EvalSet::loadArray([
+            'records' => [['ref' => 'x']],
+            'truth' => [['x', 'ghost']],
+        ], 'memory');
+    }
 }
