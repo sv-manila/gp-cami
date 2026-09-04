@@ -106,9 +106,12 @@ return [
     ],
 
     /*
-    | SSN handling (streamlineverify/security). Encryption is non-deterministic
-    | (AES-256-CBC, random IV) so matching is on the sha512 hash, never ciphertext.
-    | gp-cami must use the SAME plaintext key as CAMI or hashes/ciphertext won't align.
+    | SSN handling. CAMI resolves its plaintext key via streamlineverify/security's
+    | KeyManager; gp-cami no longer depends on that package (it was pulled in for
+    | this one constant) and instead replicates its two manager branches inline.
+    | Encryption is non-deterministic (AES-256-CBC, random IV) so matching is on
+    | the sha512 hash, never ciphertext. gp-cami must use the SAME plaintext key
+    | as CAMI or hashes/ciphertext won't align.
     */
     'ssn' => [
         'encryption_key_id' => env('GP_SSN_ENCRYPTION_KEY_ID', 1),
@@ -130,6 +133,19 @@ return [
         // lives behind KMS and is not derivable from the source DB, must set
         // GP_SSN_PLAINTEXT_KEY or SSN matching is unavailable (and now says so).
         'plaintext_key' => env('GP_SSN_PLAINTEXT_KEY'),
+
+        // The plaintext key for encryption_keys rows with manager = 'local'.
+        // Mirrors LocalStrategy::getKey() from the streamlineverify/security
+        // package, which ignores its argument and returns a hardcoded
+        // constant — CAMI only registers that strategy when app.env is 'local'
+        // or 'integration' (see AppServiceProvider::register()). This is a
+        // local/integration development key ONLY; production keys are held
+        // behind KMS under manager = 'aws' and are not derivable here (see
+        // 'plaintext_key' above / GP_SSN_PLAINTEXT_KEY). Deliberately left
+        // unset in this file and in .env.example — sv-manila/gp-cami is a
+        // PUBLIC repository, so the value is set only in each developer's own
+        // gitignored .env.
+        'local_manager_key' => env('GP_SSN_LOCAL_MANAGER_KEY'),
 
         /*
         | Placeholder-SSN safeguard.

@@ -3,21 +3,26 @@
 namespace App\GoldenProfile\Support;
 
 use Illuminate\Support\Facades\DB;
-use Streamlineverify\Security\Encryption\KeyManager\LocalStrategy;
 
 /**
  * Reproduces CAMI's SSN match key: ssn_hash = sha512(plaintext_ssn + plaintext_key),
- * exactly as Streamlineverify\Security\Encryption\Crypter::encrypt() emits it.
+ * exactly as CAMI's Crypter::encrypt() (streamlineverify/security) emits it.
  *
  * Encryption itself is non-deterministic (AES-256-CBC, random IV), so matching is
  * only ever on this hash — never on ciphertext. Requires the SAME plaintext key
- * CAMI uses; locally that is the LocalStrategy key, in prod it comes from the
- * shared encryption_keys / KeyManager.
+ * CAMI uses; locally that is the manager = 'local' key (see
+ * golden_profile.ssn.local_manager_key), in prod it comes from the shared
+ * encryption_keys registry behind KMS (manager = 'aws').
+ *
+ * Key resolution replicates CAMI's own KeyManager/EncryptionKey::scopeForDataPoint()
+ * lookup (from the streamlineverify/security package) rather than depending on
+ * that package, which gp-cami used for exactly this one lookup.
  */
 class SsnHasher
 {
     public function __construct(
         private string $subjectAttribute = 'social_security_num',
+        private string $subject = 'employees',
     ) {}
 
     /** Memoised key lookup: null = not resolved yet, false = resolved as unavailable. */
@@ -103,7 +108,13 @@ class SsnHasher
             return $configured;
         }
 
-        // Otherwise resolve from the source encryption_keys registry (local dev).
+        // Otherwise resolve from the source encryption_keys registry (local dev),
+        // replicating EncryptionKey::scopeForDataPoint()'s filter exactly: subject
+        // + subject_attribute + subject_id IS NULL (the global datapoint key, not
+        // a per-account row) + status. Matching only on subject_attribute would
+        // risk picking a different row than CAMI does — e.g. a per-account key or
+        // another subject reusing this attribute name — which would silently
+        // produce a ssn_hash that never matches CAMI's.
         //
         // This lookup must never propagate its exception. Callers treat "no key"
         // as a condition to report (a 503 explaining SSN matching is off); an
@@ -112,8 +123,10 @@ class SsnHasher
         // resolveDeterministic() run. Unreachable registry == no key available.
         try {
             $row = DB::connection('streamline_local')->table('encryption_keys')
+                ->where('subject', $this->subject)
                 ->where('subject_attribute', $this->subjectAttribute)
-                ->where('status', 1)
+                ->whereNull('subject_id')
+                ->where('status', '1')
                 ->first();
         } catch (\Throwable $e) {
             $this->unavailableReason = 'the source key registry is unreachable ('
@@ -123,23 +136,19 @@ class SsnHasher
         }
 
         if (! $row) {
-            $this->unavailableReason = 'no active encryption key for '.$this->subjectAttribute
+            $this->unavailableReason = 'no active encryption key for '.$this->subject.'.'.$this->subjectAttribute
                 .' in the source registry, and golden_profile.ssn.plaintext_key is unset';
 
             return null;
         }
 
         if (($row->manager ?? null) === 'local') {
-            try {
-                $key = (new LocalStrategy)->getKey($row->encrypted_key ?? null);
-            } catch (\Throwable $e) {
-                $this->unavailableReason = 'LocalStrategy could not unwrap the key for '
-                    .$this->subjectAttribute.' ('.class_basename($e).')';
-
-                return null;
-            }
-            if ($key === null || $key === '') {
-                $this->unavailableReason = 'LocalStrategy returned no key for '.$this->subjectAttribute;
+            // Mirrors LocalStrategy::getKey(), which ignores its argument and
+            // returns a hardcoded constant — never derived from encrypted_key.
+            $key = config('golden_profile.ssn.local_manager_key');
+            if (! $key) {
+                $this->unavailableReason = 'active key uses the "local" manager but '
+                    .'GP_SSN_LOCAL_MANAGER_KEY is unset (see golden_profile.ssn.local_manager_key)';
 
                 return null;
             }
