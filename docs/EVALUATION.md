@@ -22,6 +22,33 @@
 Every identity in "bound only by `ssn_hash`" loses its binding evidence and splits
 into one identity per source row unless another key covers it.
 
+**Status: outstanding.** Nobody has run `scripts/baseline-key-mix.sql` yet — it
+needs production hub credentials that are not available in this environment.
+**Plan 2 is blocked until this table is filled in**, because Plan 2 sizes the
+blast radius of removing the `ssn_hash` tier from these numbers; without them
+there is no way to know how many identities the removal will fragment.
+
+## Achieved — measured on this branch
+
+Measured against commit `bd80f55` with `vendor/bin/phpunit tests/Feature/EvalGateTest.php`:
+
+| Metric | Value |
+|---|---|
+| Precision | 1.0000 |
+| Recall | 1.0000 |
+| F1 | 1.0000 |
+| False merges | 0 |
+| False splits | 0 |
+| True pairs | 9 |
+| Records | 17 |
+| Clusters | 10 |
+
+`EvalGateTest` now ratchets on these numbers (`false_splits === 0`,
+`recall === 1.0`) in addition to the pre-existing floors, so a regression against
+this baseline fails the build even though it would still clear the floors. **Plan
+2 must re-baseline these two ratchet assertions in the same PR that removes the
+`ssn_hash` tier**, stating the new measured numbers in the PR description.
+
 ## Running the evaluation
 
 ```bash
@@ -29,12 +56,19 @@ vendor/bin/phpunit tests/Feature/EvalGateTest.php   # the CI gate
 php artisan gp:eval                                 # against a scratch hub
 ```
 
-`gp:eval` refuses to run against a hub that already holds staged people or
-identities. To use it, point **`GP_DB_DATABASE`** — the connection itself — at an
-empty scratch schema and migrate it. Do not try to redirect it with
-`golden_profile.connections.hub`: `DeterministicResolver` hardcodes the
-`golden_profile` connection and ignores that key, so a mismatch would write
-identities into the real hub.
+`gp:eval` is scratch-only. Before touching any table it checks the *name* of the
+database `GP_DB_DATABASE` — the connection itself — points at: the name must
+start with `gp_` and contain `test` (e.g. `gp_cami_test`), the same rule
+`HubTestCase::guardAgainstTheRealHub()` uses for the test suite. Point it at a
+scratch schema and migrate it before running. A name that fails this check is
+refused immediately, before the emptiness probes or any write — a freshly
+provisioned (and therefore empty) production hub no longer passes just because
+it happens to be empty. The command also runs its whole staging-and-resolve pass
+inside a transaction it always rolls back, so a run leaves no residue and is
+safe to repeat. Do not try to redirect it with `golden_profile.connections.hub`:
+`DeterministicResolver` hardcodes the `golden_profile` connection and ignores
+that key, so a mismatch would write identities into the real hub regardless of
+what `GP_DB_DATABASE` says.
 
 The database-backed tests use a different mechanism again — `GP_TEST_DB_*`,
 which `HubTestCase` reads. Unset, they skip.

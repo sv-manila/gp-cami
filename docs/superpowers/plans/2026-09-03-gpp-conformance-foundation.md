@@ -342,13 +342,19 @@ abstract class HubTestCase extends TestCase
     /**
      * migrate:fresh DROPS EVERY TABLE. Getting this connection wrong once would
      * destroy the hub, so the name is checked rather than trusted.
+     *
+     * A substring check on 'test' alone is not enough: the same MySQL server
+     * also hosts a database literally named streamline_test, which contains
+     * 'test' and would pass such a check. Requiring the name to both start
+     * with 'gp_' and contain 'test' admits the intended gp_cami_test while
+     * rejecting streamline_test and its neighbours.
      */
     private function guardAgainstTheRealHub(string $database): void
     {
-        if (! str_contains($database, 'test')) {
+        if (! str_starts_with($database, 'gp_') || ! str_contains($database, 'test')) {
             $this->fail(
                 "refusing to migrate '$database': GP_TEST_DB_DATABASE must be a scratch ".
-                "schema with 'test' in its name (e.g. gp_cami_test)"
+                "schema whose name starts with 'gp_' and contains 'test' (e.g. gp_cami_test)"
             );
         }
     }
@@ -656,9 +662,9 @@ Create `tests/eval/identity-pairs.json`. Every case is a failure mode named in t
     { "ref": "nodob-b", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
 
     { "ref": "ssn-a", "first_name": "Grace", "last_name": "Adeyemi", "date_of_birth": "1979-05-14", "npi": null,
-      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" },
     { "ref": "ssn-b", "first_name": "Gracie", "last_name": "Adeyemi", "date_of_birth": null, "npi": null,
-      "ssn_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" }
   ],
   "truth": [
     ["smith-a", "smith-b", "smith-c"],
@@ -1054,8 +1060,14 @@ class MatchScorer
     }
 
     /**
-     * Every unordered within-cluster pair, keyed "a|b" with the refs sorted so
-     * the key is order-independent.
+     * Every unordered within-cluster pair, keyed on the two refs joined by a
+     * null byte, with the refs sorted so the key is order-independent.
+     *
+     * A printable separator like "|" is not safe here: a ref is arbitrary
+     * data and can itself contain the separator, so two different pairs can
+     * produce the same key — cluster ['a|b','c'] and cluster ['a','b|c'] both
+     * key to "a|b|c" under a naive '|' join. Joining on "\0" instead avoids
+     * that collision.
      *
      * @param  list<list<string>>  $clusters
      * @return array<string,true>
@@ -1069,7 +1081,7 @@ class MatchScorer
             $n = count($members);
             for ($i = 0; $i < $n; $i++) {
                 for ($j = $i + 1; $j < $n; $j++) {
-                    $out[$members[$i].'|'.$members[$j]] = true;
+                    $out[$members[$i]."\0".$members[$j]] = true;
                 }
             }
         }
@@ -1606,5 +1618,34 @@ EOF
 
 **Known risks carried into execution.**
 1. Task 3 Step 2 may reveal existing resolver defects; the plan says record and fix them in separate commits rather than weaken the tests. Expect one or two unplanned fix commits.
-2. `migrate:fresh` drops every table in the target schema. The name guard in `HubTestCase` requires `test` in the database name, but a mis-set `GP_TEST_DB_DATABASE` is still the single most dangerous value in this plan. Check it before the first run.
+2. `migrate:fresh` drops every table in the target schema. The name guard in `HubTestCase` requires the database name to both start with `gp_` and contain `test`, but a mis-set `GP_TEST_DB_DATABASE` is still the single most dangerous value in this plan. Check it before the first run.
 3. `HubTestCase` migrates once per process and rolls back per test, so a test that commits its own transaction leaks state into later tests. Nothing in this plan does; watch for it in Plans 3 and 6, which touch write paths.
+
+## Amendments made during execution
+
+This document was revised after a final whole-branch code review found it still
+described defects that had already been fixed in the shipped code — it had not
+been kept in sync as those per-task fixes landed. Corrections:
+
+- **Schema guard (originally ~line 348).** Changed `str_contains($database, 'test')`
+  to `str_starts_with($database, 'gp_') && str_contains($database, 'test')`. The
+  substring-only check admits `streamline_test`, a real database on the same
+  server; shipped code (`ff0ea9e`) closes that before the harness was ever run
+  against real infrastructure.
+- **Fixture `ssn_hash` (originally ~lines 659/661).** Replaced the sha256 value
+  `e3b0c4...` — which is `sha256("")`, a filler hash and only 64 hex chars — with
+  the shipped 128-char sha512 of a literal fixture string. A filler hash is
+  exactly what `SsnHashGuard` is designed to block, so the original value would
+  have made the `ssn-a`/`ssn-b` pair fail to bind for the wrong reason (`8c4e383`,
+  `7222f18` fixed this during execution).
+- **Pair key (originally ~line 1072).** Changed the `'|'`-joined key to a
+  `"\0"`-joined key. A printable separator collides when a ref itself contains
+  that separator; shipped code (`570a750`) fixed this before it shipped.
+- **Guard description (originally ~line 1609).** Updated "requires `test` in the
+  database name" to describe the actual two-part rule (`gp_` prefix AND `test`),
+  matching the schema-guard correction above.
+- **Pint was not anticipated.** `vendor/bin/pint --test` failed on master before
+  any of this plan's own code was touched — twelve pre-existing files predated
+  the style config. That required an unplanned `style:` commit (`4cda323`)
+  to clear the codebase before CI could gate on `pint --test` at all. This plan
+  did not budget for that step.
