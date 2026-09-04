@@ -404,7 +404,7 @@ Neither plan blocks the other, and the parity machinery (`VersionerSql`, `SetVer
 | `app/GoldenProfile/Materialize/ProfileMaterializer.php` *(modify)* | Deterministic ordering on the four order-dependent scalar picks, so the byte-identical invariant is true rather than lucky. |
 | `app/GoldenProfile/Eval/EvalRunner.php` *(modify)* | Staging extracted into `stage()`; new `runSetBased()` scores the same fixture through the set-based ladder. |
 | `app/GoldenProfile/Support/SetBasedPathGuard.php` *(delete)* | Its own docblock says deleting it is part of this plan. Task 8, with the parity proof in the same commit. |
-| `database/migrations/2026_09_05_000000_add_stg_seed_id_to_gp_identity.php` *(create)* | The residual step's own scratch column, replacing its reuse of `merged_into`. |
+| `database/migrations/2026_09_04_000200_add_stg_seed_id_to_gp_identity.php` *(create)* | The residual step's own scratch column, replacing its reuse of `merged_into`. |
 | `docs/SCD2.md` *(modify)* | The set-based register: which statements version what, the NULL-key correction, the JSON-order caveat, the surviving per-row/set-based divergences, and the bulk-lock rule. |
 | `docs/EVALUATION.md` *(modify)* | Records that the gate held **and** that both paths score it identically. |
 | `tests/Support/SetBasedTestCase.php` *(create)* | Harness for tests that must let the bulk paths commit: gives up `HubTestCase`'s transaction on purpose, isolates with `TRUNCATE`, and provides the parity snapshot helpers. |
@@ -1242,7 +1242,7 @@ Two edits to `app/GoldenProfile/Support/Versioner.php`.
         $row = (array) $latest;
 
         // stg_seed_id is SqlBackfill::residualCreateAndLink()'s scratch carrier
-        // (2026_09_05_000000_add_stg_seed_id_to_gp_identity), cleared in the same
+        // (2026_09_04_000200_add_stg_seed_id_to_gp_identity), cleared in the same
         // step that sets it. Unsetting it here means a run that died between the
         // two cannot preserve a stale stg_person_id through every future version.
         unset($row['current'], $row['version_no'], $row['current_key'], $row['stg_seed_id']);
@@ -2998,7 +2998,7 @@ of the eleven columns `Versioner` compares. So the reuse would write a `stg_pers
 field and mint a version doing it — twice per identity, once on the write and once on the clear.
 
 **Files:**
-- Create: `database/migrations/2026_09_05_000000_add_stg_seed_id_to_gp_identity.php`
+- Create: `database/migrations/2026_09_04_000200_add_stg_seed_id_to_gp_identity.php`
 - Modify: `app/GoldenProfile/SqlBackfill.php:551-580` (`residualCreateAndLink`)
 - Test: `tests/Feature/SetResidualScratchTest.php`
 
@@ -3127,7 +3127,7 @@ Expected: FAIL, 3 of 3.
 
 - [ ] **Step 3: Write the migration**
 
-Create `database/migrations/2026_09_05_000000_add_stg_seed_id_to_gp_identity.php`:
+Create `database/migrations/2026_09_04_000200_add_stg_seed_id_to_gp_identity.php`:
 
 ```php
 <?php
@@ -3210,7 +3210,7 @@ Replace `residualCreateAndLink()` in `app/GoldenProfile/SqlBackfill.php`:
      *
      * The 1:1 create-then-link stays fully set-based by carrying stg_person_id out
      * of the identity INSERT in gp_identity.stg_seed_id
-     * (2026_09_05_000000_add_stg_seed_id_to_gp_identity) and joining back on it.
+     * (2026_09_04_000200_add_stg_seed_id_to_gp_identity) and joining back on it.
      * That used to be merged_into; 2026_09_04_000100_add_scd2_versioning made
      * merged_into a golden attribute, so borrowing it would write a stg_person_id
      * into a golden field and mint two versions per identity doing it — see the
@@ -3286,7 +3286,7 @@ Expected: PASS, 166 tests, 0 skipped.
 
 ```bash
 vendor/bin/pint --dirty
-git add database/migrations/2026_09_05_000000_add_stg_seed_id_to_gp_identity.php \
+git add database/migrations/2026_09_04_000200_add_stg_seed_id_to_gp_identity.php \
         app/GoldenProfile/SqlBackfill.php \
         tests/Feature/SetResidualScratchTest.php
 git commit -m "fix(scd2): stop the residual tier borrowing merged_into as scratch"
@@ -5410,7 +5410,7 @@ git commit -m "feat(scd2): prove per-row/set-based parity and remove the bulk-pa
 | Concurrency under the 16 parallel staging workers | "Concurrency under the 16 parallel staging workers": `stage()` unchanged and unlocked; `transform()` and `SetFinalizer::run()` take `GET_LOCK('gp_scd2_bulk', 0)`; each flip-and-insert pair inside `transaction($fn, DEADLOCK_RETRIES)` for the concurrent-`gp:sync` case; and why a crash between tables needs no repair step. |
 | The eval gate, both directions of movement mapped to a specific missing filter | Task 8's movement table, extended with a fourth row for "the two paths disagree". Gate re-baselines nothing; the two ratchet assertions are untouched. |
 | The eval set through both paths, asserted to agree | `EvalRunner::runSetBased()` and `EvalGateBothPathsTest` (Task 8), recorded in `docs/EVALUATION.md` as a three-column table. |
-| New migrations only, `2026_09_*` | One migration, `2026_09_05_000000_add_stg_seed_id_to_gp_identity`. Nothing edits a migration that has run. |
+| New migrations only, `2026_09_*` | One migration, `2026_09_04_000200_add_stg_seed_id_to_gp_identity`. Nothing edits a migration that has run. |
 | `vendor/bin/pint --dirty` before every commit | Every one of the eight commit steps. |
 | Public repo — no keys, no real person's data | Every fixture is synthetic: Robert Smith, Grace Adeyemi, Anna Kowalski, Chen Watanabe, Bruno Kalinowski, Ada Nwosu. The DEA `BX1234563` and NPIs `1234567893` / `1987654328` are check-digit-valid synthetic values (`1987654328` is the corrected form plan 5 Task 2 owns). No credentials anywhere. |
 

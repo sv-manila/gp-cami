@@ -174,7 +174,7 @@ signature (absent entirely), and a scheduled periodic reprofile job (the mechani
 
 | File | Responsibility |
 |---|---|
-| `database/migrations/2026_09_05_000000_create_gp_identity_block_key.php` *(create)* | Inverted `block_key -> identity_id` index table |
+| `database/migrations/2026_09_09_000000_create_gp_identity_block_key.php` *(create)* | Inverted `block_key -> identity_id` index table |
 | `app/GoldenProfile/Support/BlockKey.php` *(create)* | Single PHP-side formula for an identity/staged-row's block key |
 | `app/GoldenProfile/Resolution/Survivorship.php` *(modify)* | Reindex a recomputed identity's full member block-key set |
 | `app/GoldenProfile/Resolution/DeterministicResolver.php` *(modify)* | Seed a new identity's block key immediately; add signature-aware Pass B call |
@@ -185,7 +185,7 @@ signature (absent entirely), and a scheduled periodic reprofile job (the mechani
 | `tests/Feature/BulkBlockKeyIndexTest.php` *(create)* | Bulk-path maintenance produces the same index shape as the per-row path |
 | `app/GoldenProfile/Resolution/ProbabilisticResolver.php` *(modify)* | Candidate lookup + `block_size_cap` read the new index; hard-no + zip scoring read the signature |
 | `tests/Unit/ProbabilisticScoringTest.php` *(modify)* | Extended for signature-aware hard-no/zip; existing tests still pass unmodified |
-| `database/migrations/2026_09_05_000001_create_gp_identity_signature.php` *(create)* | Per-identity compact signature table |
+| `database/migrations/2026_09_09_000100_create_gp_identity_signature.php` *(create)* | Per-identity compact signature table |
 | `tests/Feature/IdentitySignatureTest.php` *(create)* | Signature maintenance in both paths, orphan cleanup on merge |
 | `app/Console/Commands/GpReprofile.php` *(create)* | Periodic full reprofile: dedup + finalize, sharded |
 | `routes/console.php` *(modify)* | Schedule `gp:sync` and `gp:reprofile`, with a shared mutex |
@@ -198,7 +198,7 @@ signature (absent entirely), and a scheduled periodic reprofile job (the mechani
 ## Task 1: `gp_identity_block_key` — the inverted index, maintained by the per-row path
 
 **Files:**
-- Create: `database/migrations/2026_09_05_000000_create_gp_identity_block_key.php`
+- Create: `database/migrations/2026_09_09_000000_create_gp_identity_block_key.php`
 - Create: `app/GoldenProfile/Support/BlockKey.php`
 - Modify: `app/GoldenProfile/Resolution/Survivorship.php:1-11,126-132`
 - Modify: `app/GoldenProfile/Resolution/DeterministicResolver.php:1-7,214-234`
@@ -546,7 +546,7 @@ Step 7 to omit `gp_identity_signature` and add it back in Task 4 instead — not
 
 - [ ] **Step 9: Commit**
 ```bash
-git add database/migrations/2026_09_05_000000_create_gp_identity_block_key.php app/GoldenProfile/Support/BlockKey.php app/GoldenProfile/Resolution/Survivorship.php app/GoldenProfile/Resolution/DeterministicResolver.php app/GoldenProfile/Engine.php tests/Feature/BlockKeyIndexTest.php
+git add database/migrations/2026_09_09_000000_create_gp_identity_block_key.php app/GoldenProfile/Support/BlockKey.php app/GoldenProfile/Resolution/Survivorship.php app/GoldenProfile/Resolution/DeterministicResolver.php app/GoldenProfile/Engine.php tests/Feature/BlockKeyIndexTest.php
 git commit -m "feat(gp): add gp_identity_block_key, the profile-level inverted blocking index"
 ```
 
@@ -875,7 +875,7 @@ git commit -m "perf(gp): read gp_identity_block_key for Pass B candidates and bl
 ## Task 4: `gp_identity_signature` — the compact per-profile summary
 
 **Files:**
-- Create: `database/migrations/2026_09_05_000001_create_gp_identity_signature.php`
+- Create: `database/migrations/2026_09_09_000100_create_gp_identity_signature.php`
 - Modify: `app/GoldenProfile/Resolution/Survivorship.php:1-11,132`
 - Modify: `app/GoldenProfile/Materialize/SetFinalizer.php` (after Task 2's block-key rebuild block)
 - Test: `tests/Feature/IdentitySignatureTest.php`
@@ -1125,7 +1125,7 @@ Expected: PASS (3 tests).
 
 - [ ] **Step 7: Commit**
 ```bash
-git add database/migrations/2026_09_05_000001_create_gp_identity_signature.php app/GoldenProfile/Resolution/Survivorship.php app/GoldenProfile/Materialize/SetFinalizer.php tests/Feature/IdentitySignatureTest.php
+git add database/migrations/2026_09_09_000100_create_gp_identity_signature.php app/GoldenProfile/Resolution/Survivorship.php app/GoldenProfile/Materialize/SetFinalizer.php tests/Feature/IdentitySignatureTest.php
 git commit -m "feat(gp): add gp_identity_signature, maintained by both resolution paths"
 ```
 

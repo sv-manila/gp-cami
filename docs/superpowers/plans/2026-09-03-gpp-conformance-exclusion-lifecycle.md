@@ -95,7 +95,7 @@ see the boundary note in Task 4.
 
 | File | Responsibility |
 |---|---|
-| `database/migrations/2026_09_05_090000_add_exclusion_lifecycle_fields.php` | Adds `matched_on`, `match_score`, `source_record` to `gp_identity_exclusion` (create) |
+| `database/migrations/2026_09_08_000000_add_exclusion_lifecycle_fields.php` | Adds `matched_on`, `match_score`, `source_record` to `gp_identity_exclusion` (create) |
 | `app/GoldenProfile/Support/ExclusionMatchClassifier.php` | Pure mapping from the five match-quality flags to `matched_on`/`match_score` (create) |
 | `app/GoldenProfile/Support/Versioner.php` | Registers the three new columns as versioned attributes on `gp_identity_exclusion` (modify) |
 | `app/GoldenProfile/Engine.php` | `rollupExclusions()` computes and persists the three new fields via `Versioner::write()` (modify) |
@@ -113,7 +113,7 @@ see the boundary note in Task 4.
 ## Task 1: The migration — three nullable columns, nothing else
 
 **Files:**
-- Create: `database/migrations/2026_09_05_090000_add_exclusion_lifecycle_fields.php`
+- Create: `database/migrations/2026_09_08_000000_add_exclusion_lifecycle_fields.php`
 - Test: `tests/Feature/ExclusionLifecycleSchemaTest.php`
 
 **Interfaces:**
@@ -190,7 +190,7 @@ depending on PHPUnit's evaluation order; either way the column does not exist ye
 
 - [ ] **Step 3: Write the migration**
 
-Create `database/migrations/2026_09_05_090000_add_exclusion_lifecycle_fields.php`:
+Create `database/migrations/2026_09_08_000000_add_exclusion_lifecycle_fields.php`:
 
 ```php
 <?php
@@ -301,7 +301,7 @@ columns nothing yet writes to.
 
 ```bash
 vendor/bin/pint --dirty
-git add database/migrations/2026_09_05_090000_add_exclusion_lifecycle_fields.php \
+git add database/migrations/2026_09_08_000000_add_exclusion_lifecycle_fields.php \
         tests/Feature/ExclusionLifecycleSchemaTest.php
 git commit -m "feat(exclusion): add matched_on, match_score and source_record columns"
 ```

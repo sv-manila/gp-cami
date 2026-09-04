@@ -100,8 +100,8 @@ the start, so the two plans never conflict regardless of merge order.
 | `app/GoldenProfile/Engine.php` *(modify)* | NPI junk guard in `mergeByColumn`; state-scoped `mergeByIdentifier`; quarantine null-handling in `backfill()`/`sync()` |
 | `config/golden_profile.php` *(modify)* | `junk` config block; two new `deterministic_keys` entries |
 | `tests/Unit/DeterministicKeyConfigTest.php` *(modify)* | Extended for the two new tiers |
-| `database/migrations/2026_09_04_000000_add_state_to_identifiers.php` *(create)* | Nullable `state` on `stg_person_identifier` / `gp_identity_identifier` |
-| `database/migrations/2026_09_04_000001_create_gp_quarantine.php` *(create)* | Quarantine table |
+| `database/migrations/2026_09_05_000000_add_state_to_identifiers.php` *(create)* | Nullable `state` on `stg_person_identifier` / `gp_identity_identifier` |
+| `database/migrations/2026_09_05_000100_create_gp_quarantine.php` *(create)* | Quarantine table |
 | `app/GoldenProfile/Support/QuarantineRecorder.php` *(create)* | Decides + records "no identifying data" rows |
 | `tests/Feature/QuarantineGateTest.php` *(create)* | Both ingestion paths quarantine the same shape of row |
 | `tests/Feature/IdentifierTierParityTest.php` *(create)* | Per-row real-time bind vs. bulk dedup-time consolidation converge to one identity |
@@ -1373,7 +1373,7 @@ git commit -m "feat(gp): screen INFORMATION-NOT-AVAILABLE-style junk name values
 ## Task 7: Quarantine rows with no identifying data at all, in both ingestion paths
 
 **Files:**
-- Create: `database/migrations/2026_09_04_000001_create_gp_quarantine.php`
+- Create: `database/migrations/2026_09_05_000100_create_gp_quarantine.php`
 - Create: `app/GoldenProfile/Support/QuarantineRecorder.php`
 - Modify: `app/GoldenProfile/Connectors/StreamlineLocalConnector.php:82-124` (`ingest()`, `rebuildChildren()`)
 - Modify: `app/GoldenProfile/SqlBackfill.php:152-244` (`stage()`)
@@ -1492,7 +1492,7 @@ Expected: FAIL — `gp_quarantine` table does not exist yet.
 
 - [ ] **Step 3: Write the migration**
 
-Create `database/migrations/2026_09_04_000001_create_gp_quarantine.php`:
+Create `database/migrations/2026_09_05_000100_create_gp_quarantine.php`:
 
 ```php
 <?php
@@ -1770,7 +1770,7 @@ it works (Step 8's dedicated test proves that).
 
 - [ ] **Step 10: Commit**
 ```bash
-git add database/migrations/2026_09_04_000001_create_gp_quarantine.php app/GoldenProfile/Support/QuarantineRecorder.php app/GoldenProfile/Connectors/StreamlineLocalConnector.php app/GoldenProfile/SqlBackfill.php app/GoldenProfile/Engine.php tests/Feature/QuarantineGateTest.php
+git add database/migrations/2026_09_05_000100_create_gp_quarantine.php app/GoldenProfile/Support/QuarantineRecorder.php app/GoldenProfile/Connectors/StreamlineLocalConnector.php app/GoldenProfile/SqlBackfill.php app/GoldenProfile/Engine.php tests/Feature/QuarantineGateTest.php
 git commit -m "feat(gp): quarantine rows with no identifying data, in both ingestion paths"
 ```
 
@@ -1779,7 +1779,7 @@ git commit -m "feat(gp): quarantine rows with no identifying data, in both inges
 ## Task 8: Carry `state` through the DEA/MMIS identifier pipeline; fix the per-row staging gap
 
 **Files:**
-- Create: `database/migrations/2026_09_04_000000_add_state_to_identifiers.php`
+- Create: `database/migrations/2026_09_05_000000_add_state_to_identifiers.php`
 - Modify: `app/GoldenProfile/Connectors/StreamlineLocalConnector.php:82-124,197-253`
 - Modify: `app/GoldenProfile/SqlBackfill.php:187-221`
 - Test: `tests/Unit/StreamlineLocalConnectorTest.php` (add tests)
@@ -1858,7 +1858,7 @@ array has no `state` key.
 
 - [ ] **Step 3: Write the migration**
 
-Create `database/migrations/2026_09_04_000000_add_state_to_identifiers.php`:
+Create `database/migrations/2026_09_05_000000_add_state_to_identifiers.php`:
 
 ```php
 <?php
@@ -2016,7 +2016,7 @@ Expected: PASS (9 tests)
 
 - [ ] **Step 8: Commit**
 ```bash
-git add database/migrations/2026_09_04_000000_add_state_to_identifiers.php app/GoldenProfile/Connectors/StreamlineLocalConnector.php app/GoldenProfile/SqlBackfill.php tests/Unit/StreamlineLocalConnectorTest.php
+git add database/migrations/2026_09_05_000000_add_state_to_identifiers.php app/GoldenProfile/Connectors/StreamlineLocalConnector.php app/GoldenProfile/SqlBackfill.php tests/Unit/StreamlineLocalConnectorTest.php
 git commit -m "feat(gp): carry state through DEA/MMIS identifiers; stage identifiers per-row too"
 ```
 

@@ -52,7 +52,7 @@ comparison succeeds.
 - Commit messages: `type(scope): imperative summary`.
 - `sv-manila/gp-cami` is a PUBLIC repository. Never commit a key, token, credential or real
   person's data. The eval fixture is synthetic and must stay synthetic.
-- This plan's own migration is `2026_09_05_000000_...` — dated after plan 5's `2026_09_04_*`
+- This plan's own migration is `2026_09_06_000000_create_stg_person_block_key` — dated after plan 5's `2026_09_05_*`
   migrations. If plan 5 has not merged first, run its migrations before this plan's; if the dates
   ever collide, this plan's migration must sort after plan 5's.
 
@@ -220,7 +220,7 @@ review band under today's implemented weights, wide blocking or not). Recall flo
 
 | File | Responsibility |
 |---|---|
-| `database/migrations/2026_09_05_000000_create_stg_person_block_key.php` *(create)* | New child table for the `name_state` / `name_state_zip` legs |
+| `database/migrations/2026_09_06_000000_create_stg_person_block_key.php` *(create)* | New child table for the `name_state` / `name_state_zip` legs |
 | `app/GoldenProfile/Support/BlockKeyBuilder.php` *(create)* | Pure computation of the two new legs' values |
 | `tests/Unit/BlockKeyBuilderTest.php` *(create)* | Algorithm correctness, no DB |
 | `app/GoldenProfile/Connectors/StreamlineLocalConnector.php` *(modify)* | `blockKeyRows()`; `rebuildChildren()` stages the new legs too |
@@ -239,7 +239,7 @@ review band under today's implemented weights, wide blocking or not). Recall flo
 ## Task 1: `stg_person_block_key` — the child table for the new legs
 
 **Files:**
-- Create: `database/migrations/2026_09_05_000000_create_stg_person_block_key.php`
+- Create: `database/migrations/2026_09_06_000000_create_stg_person_block_key.php`
 
 **Interfaces:**
 - Produces: table `stg_person_block_key(stg_person_id, block_type, block_key)`, indexed on
@@ -316,7 +316,7 @@ Expected: no error; `stg_person_block_key` appears in `gp_cami_test` with the tw
 
 - [ ] **Step 3: Commit**
 ```bash
-git add database/migrations/2026_09_05_000000_create_stg_person_block_key.php
+git add database/migrations/2026_09_06_000000_create_stg_person_block_key.php
 git commit -m "feat(gp): add stg_person_block_key for the name_state/name_state_zip blocking legs"
 ```
 

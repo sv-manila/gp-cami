@@ -410,27 +410,34 @@ assertions fail — by design, that is what plan 1 built them for. Splitting the
 re-baseline would leave CI red between two tasks, so both happen here and the task's exit criterion
 is a fully green suite.
 
+**Re-baselined onto plan 5's numbers, not plan 1's (`00-PROGRAMME.md` §2, §4).** `00-PROGRAMME.md`
+fixes the canonical execution order as `1 → 5 → 3a → 3b → 2 → …`, so by the time this task runs, plan
+5 has already raised the fixture to 11 true pairs (an MMIS pair and a DEA pair, both newly bindable)
+with recall still 1.0. **The `0.8889` (8/9) figure below applies only if plan 2 runs before plan 5**;
+under the canonical order the correct re-baseline is `0.9091` (10/11), on a fixture of 11 true pairs,
+not 9.
+
 The measured consequence, worked out in advance so the implementer knows what to expect rather than
 what to accept: the fixture's predicted clusters become smith{a,b,c}, garcia{a,b}, kowalski{a,b},
-chain{a,b,c} and singletons — 8 predicted pairs, all correct. `true_pairs` stays 9 (the `ssn-a`/`ssn-b`
-truth cluster is untouched), `true_positives` drops to 8.
+chain{a,b,c}, the plan-5 MMIS and DEA pairs, and singletons — 10 predicted pairs, all correct.
+`true_pairs` stays 11 (the `ssn-a`/`ssn-b` truth cluster is untouched), `true_positives` drops to 10.
 
 | Metric | Before | After |
 |---|---|---|
-| `true_pairs` | 9 | 9 |
-| `predicted_pairs` | 9 | 8 |
-| `true_positives` | 9 | 8 |
+| `true_pairs` | 11 | 11 |
+| `predicted_pairs` | 11 | 10 |
+| `true_positives` | 11 | 10 |
 | `false_merges` | 0 | 0 |
 | `false_splits` | 0 | **1** |
-| precision | 1.0 | 1.0 (8/8) |
-| recall | 1.0 | **0.8889** (8/9) |
-| f1 | 1.0 | **0.9412** (16/17) |
+| precision | 1.0 | 1.0 (10/10) |
+| recall | 1.0 | **0.9091** (10/11) |
+| f1 | 1.0 | **0.9524** (20/21) |
 
-Both programme floors still hold — precision 1.0 ≥ 0.99, recall 0.8889 ≥ 0.80 — so only the two
-ratchets move. They are re-baselined onto the **integer counts**, not the float, because 8/9 has no
-exact decimal form and `assertSame(0.888…, …)` invites someone to loosen it later;
-`assertSame(1, false_splits)` and `assertSame(8, true_positives)` are exact and, with the existing
-`true_pairs >= 9`, pin numerator and denominator both.
+Both programme floors still hold — precision 1.0 ≥ 0.99, recall 0.9091 ≥ 0.80 — so only the two
+ratchets move. They are re-baselined onto the **integer counts**, not the float, because 10/11 has no
+exact decimal form and `assertSame(0.909…, …)` invites someone to loosen it later;
+`assertSame(1, false_splits)` and `assertSame(10, true_positives)` are exact and, with the existing
+`true_pairs >= 11`, pin numerator and denominator both.
 
 One assertion is **added**, not just relaxed: `false_splits === 1` on its own would happily accept a
 regression that split `garcia` while accidentally merging the `ssn` pair. The new assertion names
@@ -689,7 +696,7 @@ call sites against ordered ones and both drop by one, so the equality still hold
 Run: `vendor/bin/phpunit tests/Feature/EvalGateTest.php`
 
 Expected: FAIL with
-`regression against the measured baseline — precision 1.0000 recall 0.8889 f1 0.9412 — 0 false merge(s), 1 false split(s)`
+`regression against the measured baseline — precision 1.0000 recall 0.9091 f1 0.9524 — 0 false merge(s), 1 false split(s)`
 (the `false_splits` assertion trips first; the recall assertion would follow).
 
 **Write down the message verbatim.** If the numbers differ from the table at the head of this task,
@@ -715,11 +722,13 @@ Replace `tests/Feature/EvalGateTest.php` lines 11–50 (the whole test method) w
 
         // The eval set must not shrink. Deleting records raises every ratio for
         // free, so a floor on the metrics alone is not a regression net — this
-        // pins the denominator. 9 true pairs = smith(3) + garcia(1) + kowalski(1)
-        // + chain(3) + ssn(1). The ssn pair stays in the set even though the
-        // matcher can no longer find it; see the block below.
+        // pins the denominator. 11 true pairs = smith(3) + garcia(1) + kowalski(1)
+        // + chain(3) + ssn(1) + mmis(1) + dea(1) — the last two added by plan 5,
+        // which runs before this plan under 00-PROGRAMME.md §2. The ssn pair
+        // stays in the set even though the matcher can no longer find it; see
+        // the block below.
         $this->assertGreaterThanOrEqual(
-            9, $report['true_pairs'],
+            11, $report['true_pairs'],
             'the eval set shrank — pairs were removed, not the matcher improved'
         );
 
@@ -735,21 +744,29 @@ Replace `tests/Feature/EvalGateTest.php` lines 11–50 (the whole test method) w
         // calibration lands. Never lower it to make a build pass.
         $this->assertGreaterThanOrEqual(0.80, $report['recall'], $message);
 
-        // RE-BASELINED by the GPP conformance programme's SSN removal (plan 2).
+        // RE-BASELINED by the GPP conformance programme's SSN removal (plan 2),
+        // onto plan 5's fixture, not plan 1's — see 00-PROGRAMME.md §2 and §4.
+        // Plan 5 runs first under the canonical order and raises true_pairs to
+        // 11 (an mmis pair and a dea pair, both newly bindable) with recall
+        // still 1.0. This task's own baseline is therefore 11, not 9.
         //
         // Was: assertSame(0, false_splits) and assertSame(1.0, recall), measured
-        // when the ssn_hash tier still existed. The tier was the only thing binding
-        // ssn-a to ssn-b, so removing it turns that pair into a false split:
-        // true_pairs 9 (unchanged), true_positives 9 -> 8, recall 1.0 -> 8/9
-        // (0.8889), f1 1.0 -> 16/17 (0.9412), false_splits 0 -> 1. Precision stays
-        // 1.0 because the tier only ever produced correct merges.
+        // against plan 5's 11-pair fixture. The ssn_hash tier was the only thing
+        // binding ssn-a to ssn-b, so removing it turns that pair into a false
+        // split: true_pairs 11 (unchanged), true_positives 11 -> 10, recall
+        // 1.0 -> 10/11 (0.9091), f1 1.0 -> 20/21 (0.9524), false_splits 0 -> 1.
+        // Precision stays 1.0 because the tier only ever produced correct
+        // merges. (If this plan is ever run before plan 5 instead, the fixture
+        // is still at 9 true pairs and the corresponding figures are
+        // true_positives 8, recall 0.8889 (8/9), f1 0.9412 (16/17) — see the
+        // note at the top of this task.)
         //
-        // The ratchet is on the integer counts, not the float. 8/9 has no exact
-        // decimal form, and a float ratchet is an invitation to widen the tolerance
-        // later; these two are exact, and together with true_pairs >= 9 above they
-        // pin the numerator and the denominator.
+        // The ratchet is on the integer counts, not the float. 10/11 has no
+        // exact decimal form, and a float ratchet is an invitation to widen the
+        // tolerance later; these two are exact, and together with
+        // true_pairs >= 11 above they pin the numerator and the denominator.
         $this->assertSame(1, $report['false_splits'], "regression against the measured baseline — $message");
-        $this->assertSame(8, $report['true_positives'], "regression against the measured baseline — $message");
+        $this->assertSame(10, $report['true_positives'], "regression against the measured baseline — $message");
 
         // WHICH pair is allowed to be split. false_splits === 1 on its own would
         // accept a run that split garcia and simultaneously merged the ssn pair —
@@ -777,7 +794,7 @@ Replace `tests/Feature/EvalGateTest.php` lines 11–50 (the whole test method) w
 
 The `ssn-a`/`ssn-b` records **remain in the fixture and remain one truth cluster**, permanently, as
 the record of a capability the hub deliberately gave up. `docs/EVALUATION.md` forbids deleting them
-and `true_pairs >= 9` exists to catch it; retiring them and cutting the denominator to 8 would make
+and `true_pairs >= 11` exists to catch it; retiring them and cutting the denominator to 10 would make
 the gate report a perfect 1.0 recall for a matcher that is measurably worse than yesterday's, which
 is the exact failure mode plan 1 built the assertion to prevent.
 
@@ -785,7 +802,7 @@ In `tests/eval/identity-pairs.json`, replace the `notes` value on line 3 with (s
 requires):
 
 ```
-"notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* pair is a KNOWN, ACCEPTED FALSE SPLIT and must never be deleted. It was bound solely by the ssn_hash tier, which the GPP conformance programme removed (Delivery Checklist §1: the hub never stores an SSN), so the matcher can no longer find it — recall is 8/9 by design and EvalGateTest ratchets on exactly that. Deleting the pair would restore a perfect score for a matcher that is measurably worse, which is what the `true_pairs >= 9` assertion exists to catch; EvalSetShapeTest asserts both refs are still present in one cluster. The ssn_hash value is kept on the records as documentation of what the retired tier matched on — a synthetic sha512 of the literal string gp-cami-eval-fixture-synthetic-ssn-grace-adeyemi, deliberately NOT a filler value — but EvalRunner stops staging it once Task 7 drops the column. The nodob-a/nodob-b pair (same name, no DOB on either record) is kept apart in `truth` as a deliberate POLICY assertion — never merge on name alone without a DOB, no matter how suggestive the name match looks — not a conclusion drawn from the available evidence, so nobody should later 'correct' the answer key to merge them."
+"notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* pair is a KNOWN, ACCEPTED FALSE SPLIT and must never be deleted. It was bound solely by the ssn_hash tier, which the GPP conformance programme removed (Delivery Checklist §1: the hub never stores an SSN), so the matcher can no longer find it — recall is 10/11 by design and EvalGateTest ratchets on exactly that. Deleting the pair would restore a perfect score for a matcher that is measurably worse, which is what the `true_pairs >= 11` assertion exists to catch; EvalSetShapeTest asserts both refs are still present in one cluster. The ssn_hash value is kept on the records as documentation of what the retired tier matched on — a synthetic sha512 of the literal string gp-cami-eval-fixture-synthetic-ssn-grace-adeyemi, deliberately NOT a filler value — but EvalRunner stops staging it once Task 7 drops the column. The nodob-a/nodob-b pair (same name, no DOB on either record) is kept apart in `truth` as a deliberate POLICY assertion — never merge on name alone without a DOB, no matter how suggestive the name match looks — not a conclusion drawn from the available evidence, so nobody should later 'correct' the answer key to merge them."
 ```
 
 Leave `records` and `truth` byte-for-byte unchanged.
@@ -810,7 +827,7 @@ Append to `tests/Unit/EvalSetShapeTest.php`:
     public function test_the_retired_ssn_pair_is_still_one_truth_cluster(): void
     {
         // Splitting them in the ANSWER KEY would be the subtler way to make the
-        // gate green: true_pairs drops to 8 and recall returns to 1.0 without a
+        // gate green: true_pairs drops to 10 and recall returns to 1.0 without a
         // single record being deleted. The answer key records who the same person
         // IS, which the matcher's ability to find them does not change.
         $clusters = array_filter(
@@ -840,19 +857,24 @@ with:
 ## Achieved — measured on this branch
 
 Measured with `vendor/bin/phpunit tests/Feature/EvalGateTest.php` after the GPP conformance
-programme's SSN removal (plan 2).
+programme's SSN removal (plan 2), executed in the canonical order (`00-PROGRAMME.md` §2), i.e. after
+plan 5 has already raised the fixture from 9 to 11 true pairs.
 
-| Metric | Before plan 2 | After plan 2 |
+| Metric | Before plan 2 (after plan 5) | After plan 2 |
 |---|---|---|
 | Precision | 1.0000 | 1.0000 |
-| Recall | 1.0000 | **0.8889** (8/9) |
-| F1 | 1.0000 | **0.9412** (16/17) |
+| Recall | 1.0000 | **0.9091** (10/11) |
+| F1 | 1.0000 | **0.9524** (20/21) |
 | False merges | 0 | 0 |
 | False splits | 0 | **1** |
-| True pairs | 9 | 9 |
-| True positives | 9 | **8** |
-| Records | 17 | 17 |
-| Clusters | 10 | 10 |
+| True pairs | 11 | 11 |
+| True positives | 11 | **10** |
+| Records | 17 + plan 5's mmis/dea records | same |
+| Clusters | 10 + plan 5's new clusters | same |
+
+**If plan 2 runs before plan 5 instead**, the fixture is still at plan 1's 9 true pairs and the
+corresponding baseline is recall 0.8889 (8/9), f1 0.9412 (16/17), true_positives 8.
+`00-PROGRAMME.md` §2 fixes the order as 5-before-2, so the table above is the one to build against.
 
 **Why recall moved, and why that is correct.** The `ssn_hash` tier was the only evidence binding
 `ssn-a` to `ssn-b`. Confluence Delivery Checklist §1 requires that the hub never store an SSN and the
@@ -861,20 +883,22 @@ removed. That pair is now a **known, accepted false split** and stays in the fix
 Precision is unaffected: the tier only ever produced correct merges, so nothing it used to do was
 wrong — the hub simply is not allowed to do it.
 
-`EvalGateTest` ratchets on `false_splits === 1` and `true_positives === 8` — integer counts, because
-8/9 has no exact decimal form and a float ratchet invites a widened tolerance. It additionally
+`EvalGateTest` ratchets on `false_splits === 1` and `true_positives === 10` — integer counts, because
+10/11 has no exact decimal form and a float ratchet invites a widened tolerance. It additionally
 asserts *which* pair may be split, so a future change cannot trade this split for a different one at
 the same count. The floors (precision ≥ 0.99, recall ≥ 0.80) are untouched and were never at risk.
 
 **The `ssn-*` records must not be deleted, and the answer key must not be re-cut to separate them.**
-Either move would return the report to a perfect score for a strictly worse matcher. `true_pairs >= 9`
+Either move would return the report to a perfect score for a strictly worse matcher. `true_pairs >= 11`
 catches the first; `EvalSetShapeTest::test_the_retired_ssn_pair_is_still_one_truth_cluster` catches the
 second.
 
-**Recovering this recall is plan 5's job**, not a reason to reconsider plan 2: MMIS as a resolve-time
-tier, `(state, provider#)` and name+state blocking are all capable of binding records that share no
-SSN. When plan 5 lands, add fixture records that exercise the new keys and raise this ratchet — do
-not raise it by deleting the accepted split.
+**Plan 5 already supplied the compensating keys, before this task ran.** MMIS as a resolve-time tier
+and DEA promoted alongside it (`00-PROGRAMME.md` §2's stated reason for ordering 5 before 2) are why
+this task's baseline starts at 11 true pairs rather than 9 — not because either one recovers *this*
+pair. Nothing but `ssn_hash` ever bound `ssn-a` to `ssn-b`, by fixture design, so no key plan 5 adds
+recovers this specific split; the recall floor recovers overall, across the fixture, not for this
+pair. There is no further "when plan 5 lands" step left for this task.
 ```
 
 Also correct the closing paragraph of the file, which still speaks of plan 2 in the future tense.
@@ -883,9 +907,11 @@ Replace the final `**Plan 2 will move this floor.** …` paragraph with:
 ```markdown
 **Plan 2 moved this baseline, not the floor.** The `ssn-a`/`ssn-b` pair was bound by the `ssn_hash`
 tier; when the tier was removed the pair became a false split and recall fell to a known, measured
-8/9. The floors were never lowered — the two measured ratchets were re-baselined onto exact integer
-counts and the records stayed in the fixture. That is the pattern for any future capability removal:
-re-baseline the ratchet, keep the evidence, say so in the PR description.
+10/11 (against plan 5's already-raised 11-pair fixture; 8/9 only if plan 2 runs before plan 5 — see
+`00-PROGRAMME.md` §2 and §4). The floors were never lowered — the two measured ratchets were
+re-baselined onto exact integer counts and the records stayed in the fixture. That is the pattern for
+any future capability removal: re-baseline the ratchet, keep the evidence, say so in the PR
+description.
 ```
 
 - [ ] **Step 13: Commit**
@@ -906,12 +932,13 @@ removed, npi now leads the ladder.
 Measured cost on tests/eval/identity-pairs.json: the ssn-a/ssn-b pair was
 bound solely by this tier and is now a known, accepted false split.
 
-  true_pairs      9 -> 9      (fixture unchanged; records NOT deleted)
-  true_positives  9 -> 8
+  true_pairs      11 -> 11    (fixture unchanged; records NOT deleted; 11 is plan 5's
+                               baseline, already raised from plan 1's 9 before this task ran)
+  true_positives  11 -> 10
   false_splits    0 -> 1
   precision   1.0000 -> 1.0000
-  recall      1.0000 -> 0.8889 (8/9)
-  f1          1.0000 -> 0.9412 (16/17)
+  recall      1.0000 -> 0.9091 (10/11)
+  f1          1.0000 -> 0.9524 (20/21)
 
 Both programme floors still hold (precision >= 0.99, recall >= 0.80). The two
 measured ratchets are re-baselined onto exact integer counts rather than the

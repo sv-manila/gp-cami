@@ -656,7 +656,7 @@ more than acting on it, and plan 6 owns the steward surface where a human can ac
 |---|---|
 | `docs/ENTITY-TYPES.md` *(create)* | The one-table-versus-two ruling, the inference rule and its measured trap, the entity ladder, the entity blocking key, the survivorship differences, the reclassification runbook, and the plan-3b obligations |
 | `scripts/entity-preflight.sql` *(create)* | Read-only pre-migration audit: source-side shape counts and the cross-type key-collision probe, runnable against the real hub by a human |
-| `database/migrations/2026_09_05_000000_add_entity_type_and_org_name.php` *(create)* | `entity_type` + `org_name` on `gp_identity`, `stg_person` and `gp_identity_profile`; `ck_identity_entity_type`; `idx_org_name` |
+| `database/migrations/2026_09_07_000000_add_entity_type_and_org_name.php` *(create)* | `entity_type` + `org_name` on `gp_identity`, `stg_person` and `gp_identity_profile`; `ck_identity_entity_type`; `idx_org_name` |
 | `app/GoldenProfile/Support/BlockKey.php` *(create)* | The one implementation of the blocking-key rule, individual and entity |
 | `app/GoldenProfile/Connectors/StreamlineLocalConnector.php` *(modify)* | Infers `entity_type` / `org_name` at the shared choke point; delegates the block key |
 | `app/GoldenProfile/Support/Versioner.php` *(modify)* | `entity_type` and `org_name` join `gp_identity`'s `attributes` |
@@ -1199,7 +1199,7 @@ Adds the two columns to the three tables that need them, the value-domain CHECK,
 for the same reason plan 3's migration is: the `ALGORITHM` clauses and the guards are the point.
 
 **Files:**
-- Create: `database/migrations/2026_09_05_000000_add_entity_type_and_org_name.php`
+- Create: `database/migrations/2026_09_07_000000_add_entity_type_and_org_name.php`
 - Modify: `app/GoldenProfile/Support/Versioner.php` (the `gp_identity` spec)
 - Modify: `app/GoldenProfile/SqlBackfill.php` (`IDENTITY_KEY_INDEXES`)
 - Modify: `app/GoldenProfile/Materialize/SetFinalizer.php` (`IDENTITY_KEY_INDEXES`)
@@ -1348,7 +1348,7 @@ Expected: FAIL, 5 failures. The first is
 
 - [ ] **Step 3: Write the migration**
 
-Create `database/migrations/2026_09_05_000000_add_entity_type_and_org_name.php`:
+Create `database/migrations/2026_09_07_000000_add_entity_type_and_org_name.php`:
 
 ```php
 <?php
@@ -1669,7 +1669,7 @@ list and add a note:
 `merged_into`, **`entity_type`**, **`org_name`**.
 
 `entity_type` and `org_name` were added by plan 4
-(`2026_09_05_000000_add_entity_type_and_org_name`). Both are attributes rather than derived:
+(`2026_09_07_000000_add_entity_type_and_org_name`). Both are attributes rather than derived:
 `org_name` because an organization renames and the version chain IS the doc's `entity_names`
 history, and `entity_type` because its only writer is a deliberate reclassification
 (`gp:entity-reclassify`), so versioning it costs no row growth and makes a wrong reclassification
@@ -1691,7 +1691,7 @@ have moved; if the gate does move here, the migration touched more than it claim
 
 - [ ] **Step 11: Commit**
 ```bash
-git add database/migrations/2026_09_05_000000_add_entity_type_and_org_name.php \
+git add database/migrations/2026_09_07_000000_add_entity_type_and_org_name.php \
         app/GoldenProfile/Support/Versioner.php \
         app/GoldenProfile/SqlBackfill.php \
         app/GoldenProfile/Materialize/SetFinalizer.php \
@@ -1711,6 +1711,13 @@ goes there and nowhere else. The blocking-key rule moves out of three copies int
 same time, because it now has two branches and three copies of a two-branch rule is how the
 `Survivorship`/`SetFinalizer` tiebreak divergence happened.
 
+**Dependency on plan 5b, added by this task (`00-PROGRAMME.md` §5).** Block-key construction is
+5b's `BlockKeyBuilder`, so `BlockKey::for()`'s entity branch delegates to a new
+`BlockKeyBuilder::entityNameState(?string $orgName, ?string $state): ?string` method rather than
+computing the key itself. This plan states the method as a requirement on 5b's class; it is not
+reimplemented here. Plan 5b lands before this plan in the canonical order, so the method is available
+by the time this task runs.
+
 **Files:**
 - Create: `app/GoldenProfile/Support/BlockKey.php`
 - Modify: `app/GoldenProfile/Connectors/StreamlineLocalConnector.php`
@@ -1725,6 +1732,7 @@ same time, because it now has two branches and three copies of a two-branch rule
   - `personRow()` returns two new keys, `entity_type` and `org_name`.
   - `HubTestCase::stageEntity(array $overrides = []): int`
   - `HubTestCase::stageAddress(int $stgPersonId, array $address): void`
+- Consumes: `BlockKeyBuilder::entityNameState()` (plan 5b, new method added for this task).
 - Consumed by: Tasks 4, 5, 6, 7, 9, 10.
 
 - [ ] **Step 1: Write the failing test**
@@ -1987,6 +1995,18 @@ namespace App\GoldenProfile\Support;
  * identity stamped auto_match. That silent false split is pre-existing and plan
  * 6 owns it; gp:entity-audit reports the entity block-size distribution so it
  * can be watched.
+ *
+ * OWNERSHIP (00-PROGRAMME.md §5). Block-key construction belongs to plan 5b's
+ * `BlockKeyBuilder`, not to this class -- 5b's staging legs and this entity leg
+ * are two instances of the same mechanism, and a second class computing
+ * blocking keys is exactly the divergence this docblock's own history lesson
+ * warns about. So the RULE above stays (it is this plan's to define -- 5b has
+ * no reason to know what an organization's name looks like), but the
+ * CONSTRUCTION does not: `entity()` below is a thin call into a new
+ * `BlockKeyBuilder::entityNameState(?string $orgName, ?string $state): ?string`
+ * method. That method is a stated, explicit dependency this plan adds to plan
+ * 5b's builder -- not a reimplementation -- and plan 5b lands before this plan
+ * in the canonical order, so the method exists by the time Task 3 runs.
  */
 class BlockKey
 {
@@ -2014,35 +2034,16 @@ class BlockKey
         return soundex($last).'|'.($dob ? substr((string) $dob, 0, 4) : '____');
     }
 
+    /**
+     * Delegates to plan 5b's builder rather than reimplementing the mechanism
+     * here -- see the class docblock's OWNERSHIP note. `entityNameState()` is a
+     * new method this plan asks 5b to add: same first-alphabetic-token +
+     * soundex + two-letter-state construction described above, just owned in
+     * one place alongside 5b's `nameState()` and `nameStateZip()`.
+     */
     private static function entity(?string $orgName, ?string $state): ?string
     {
-        $token = self::firstAlphabeticToken(self::clean($orgName));
-
-        if ($token === null) {
-            return null;
-        }
-
-        $st = self::clean($state);
-        $st = $st === null ? '__' : strtoupper(substr($st, 0, 2));
-
-        return 'E:'.soundex($token).'|'.$st;
-    }
-
-    /**
-     * The first run of letters in the name. Digits and punctuation are skipped
-     * rather than consumed, so "3M Dialysis" blocks on "Dialysis" instead of on
-     * soundex('') -- soundex() of a digit-only string returns an empty string,
-     * which would put every numerically-named organization in one bucket.
-     */
-    private static function firstAlphabeticToken(?string $name): ?string
-    {
-        if ($name === null) {
-            return null;
-        }
-
-        preg_match('/[A-Za-z]+/', $name, $m);
-
-        return $m[0] ?? null;
+        return BlockKeyBuilder::entityNameState($orgName, $state);
     }
 
     private static function clean(?string $v): ?string
@@ -3639,7 +3640,7 @@ In `config/golden_profile.php`, inside the `probabilistic` block, after `impleme
         // comment above is right that changing those "changes merge behaviour
         // across the whole hub", and it does -- they govern ~13.38M live rows.
         // This set governs ZERO existing rows, because
-        // 2026_09_05_000000_add_entity_type_and_org_name classified every existing
+        // 2026_09_07_000000_add_entity_type_and_org_name classified every existing
         // identity as 'individual'. It has no blast radius, so it can be set from
         // first principles now and calibrated later like the other one.
         //
@@ -5276,7 +5277,7 @@ use Illuminate\Support\Facades\DB;
 /**
  * Read-only classification report over an existing hub. WRITES NOTHING.
  *
- * 2026_09_05_000000_add_entity_type_and_org_name classified every existing
+ * 2026_09_07_000000_add_entity_type_and_org_name classified every existing
  * identity as 'individual' -- deliberately the status quo rather than a guess, so
  * that the migration itself could not move a single match. This command produces
  * the evidence needed to decide what to reclassify, and gp:entity-reclassify acts
@@ -6334,26 +6335,31 @@ B's candidate discovery with a `name_state` leg and a `name_state_zip` leg, held
 `stg_person_block_key` child table, and explicitly leaves `stg_person.block_key` alone as the home of
 the existing phonetic-last-name + birth-year leg. Three concrete overlaps:
 
-1. **Migration filename collision.** It creates
-   `database/migrations/2026_09_05_000000_create_stg_person_block_key.php`; this plan's Task 2
-   creates `2026_09_05_000000_add_entity_type_and_org_name.php`. Identical timestamp prefixes.
-   Laravel will run both (the filenames differ) but orders them alphabetically within the shared
-   prefix, which is not an ordering anyone chose. **Whichever lands second should renumber to
-   `2026_09_05_000100`.**
-2. **`BlockKeyBuilder` versus this plan's `BlockKey`.** 5b creates
+1. **Migration filename collision — resolved.** As originally authored, both plans proposed
+   `2026_09_06_000000_create_stg_person_block_key` (renumbered per `00-PROGRAMME.md` §3, which resolved the collision), and this plan's own Task 2 migration also
+   collided on that prefix. This is no longer a per-implementer judgment call: `00-PROGRAMME.md` §3
+   assigns 5b's migration `2026_09_06_000000_create_stg_person_block_key` and this plan's Task 2
+   migration `2026_09_07_000000_add_entity_type_and_org_name`, strictly increasing in dependency
+   order. Use those filenames; do not renumber at merge time.
+2. **`BlockKeyBuilder` versus this plan's `BlockKey` — resolved the other way round.** 5b creates
    `app/GoldenProfile/Support/BlockKeyBuilder.php` to compute its two new legs; Task 3 here creates
    `app/GoldenProfile/Support/BlockKey.php` to collapse the three existing duplicate implementations
-   of the `stg_person.block_key` rule and add its entity branch. They own different columns, so they
-   are compatible in principle — but two similarly named support classes both computing blocking
-   keys is precisely the divergence both plans argue against. **The reconciliation is one line:
-   `BlockKeyBuilder` delegates the `stg_person.block_key` leg to `BlockKey::for()` rather than
-   reimplementing it.**
+   of the `stg_person.block_key` rule and add its entity branch. Two similarly named support classes
+   both computing blocking keys is precisely the divergence both plans argue against, and
+   `00-PROGRAMME.md` §5 assigns block-key construction to 5b, not to this plan — the reverse of what
+   this section originally proposed. **Task 3's entity branch delegates to a new
+   `BlockKeyBuilder::entityNameState(?string $orgName, ?string $state): ?string` method instead of
+   computing the key itself**; see Task 3 for the code. `BlockKey` keeps the individual-leg rule (it
+   is pre-existing and 5b has no reason to own it) and the entity-leg *rule*, just not the entity-leg
+   *construction*.
 3. **5b's new legs are not entity-aware.** `name_state` and `name_state_zip` key on a person's name,
-   which is NULL on every entity row, so an organization would get a null value for both legs and
-   gain nothing from the widening. If 5b lands after this plan it should read `org_name` for
-   `entity_type = 'entity'` rows; if it lands first, that is a follow-up. Either way the two plans
-   must agree that an entity leg is prefixed so it cannot collide with an individual leg — the
-   reason `BlockKey` prefixes `E:` at all.
+   which is NULL on every entity row, so an organization gets a null value for both legs and gains
+   nothing from the widening. Under the canonical order (`00-PROGRAMME.md` §2) 5b lands before this
+   plan, so this is a known gap this plan inherits rather than an open ordering question: an entity
+   record has no widened Pass B candidate discovery until a follow-up teaches those legs to read
+   `org_name` for `entity_type = 'entity'` rows. Either plan may pick that follow-up up; both must
+   agree that an entity leg is prefixed so it cannot collide with an individual leg — the reason
+   `BlockKey` prefixes `E:` at all.
 
 **`2026-09-03-gpp-conformance-scd2-set-based-parity.md` (plan 3b).** This is the home for the six
 obligations `docs/ENTITY-TYPES.md` hands over, which is good news — but it also **deletes
