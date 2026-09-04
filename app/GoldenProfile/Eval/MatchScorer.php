@@ -64,8 +64,14 @@ class MatchScorer
      * contain the separator, so two different pairs can produce the same
      * key — cluster ['a|b','c'] and cluster ['a','b|c'] both key to "a|b|c"
      * under a naive '|' join. That silently collapses two pairs into one
-     * array entry and undercounts every metric. A null byte cannot appear in
-     * a ref, so joining on "\0" instead makes the key collision-free.
+     * array entry and undercounts every metric. A null byte does not appear
+     * in any ref format this codebase uses (refs come from fixture JSON
+     * strings and staged-row identifiers, never raw binary), so joining on
+     * "\0" instead makes collisions practically impossible here — this is a
+     * data-domain assumption, not a language guarantee, since a JSON string
+     * can technically carry an escaped \u0000. A fully collision-proof
+     * alternative would key on a two-level array (outer key on one member,
+     * inner key on the other) instead of a single joined string.
      *
      * @param  list<list<string>>  $clusters
      * @return array<string,true>

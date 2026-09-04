@@ -15,7 +15,9 @@ class GpEval extends Command
         {--min-recall=0.80 : fail below this recall}
         {--allow-false-merges=0 : fail above this many false merges}';
 
-    protected $description = 'Score the resolver against a labeled evaluation set';
+    protected $description = 'Scratch-only: score the resolver against a labeled evaluation set. '
+        .'Runs inside a transaction that is always rolled back, and refuses to run '
+        .'anywhere but a database whose name starts with gp_ and contains test.';
 
     public function handle(): int
     {
@@ -25,6 +27,21 @@ class GpEval extends Command
         $hub = DB::connection('golden_profile');
         $database = $hub->getDatabaseName();
 
+        // Same rule as HubTestCase::guardAgainstTheRealHub(). This command writes
+        // synthetic people and identities into whatever GP_DB_DATABASE points at
+        // and, before the fix below, never cleaned up — pointed at a freshly
+        // provisioned (and therefore empty) production hub, it would pass the
+        // emptiness check and inject fixture data straight into prod. Checking
+        // the schema name first, before any table is even queried, closes that.
+        if (! str_starts_with($database, 'gp_') || ! str_contains($database, 'test')) {
+            $this->error(
+                "refusing to run against '$database': gp:eval only runs against a scratch ".
+                "schema whose name starts with 'gp_' and contains 'test' (e.g. gp_cami_test)."
+            );
+
+            return self::FAILURE;
+        }
+
         if ($hub->table('stg_person')->exists() || $hub->table('gp_identity')->exists()) {
             $this->error("refusing to run: '$database' already holds staged people or identities.");
             $this->line('Point GP_DB_DATABASE at an empty scratch schema and migrate it first.');
@@ -32,15 +49,24 @@ class GpEval extends Command
             return self::FAILURE;
         }
 
-        $systemId = (int) $hub->table('gp_source_system')->insertGetId([
-            'system_code' => 'eval-'.uniqid(),
-            'display_name' => 'eval harness',
-            'reliability_rank' => 50,
-            'is_active' => 1,
-            'added_at' => now(),
-        ]);
+        $hub->beginTransaction();
 
-        $report = (new EvalRunner($systemId))->run($set)['report'];
+        try {
+            $systemId = (int) $hub->table('gp_source_system')->insertGetId([
+                'system_code' => 'eval-'.uniqid(),
+                'display_name' => 'eval harness',
+                'reliability_rank' => 50,
+                'is_active' => 1,
+                'added_at' => now(),
+            ]);
+
+            $report = (new EvalRunner($systemId))->run($set)['report'];
+        } finally {
+            // Leave no residue: every insert this command makes — the source
+            // system row and everything EvalRunner stages/resolves — rolls back
+            // here, so a second run never trips the emptiness guard above.
+            $hub->rollBack();
+        }
 
         $this->table(['metric', 'value'], [
             ['true pairs', $report['true_pairs']],
