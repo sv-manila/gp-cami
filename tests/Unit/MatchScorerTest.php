@@ -81,4 +81,41 @@ class MatchScorerTest extends TestCase
 
         $this->assertSame($a, $b);
     }
+
+    public function test_refs_containing_the_separator_do_not_collide(): void
+    {
+        // ['a|b','c'] and ['a','b|c'] both key to "a|b|c" under a naive '|'
+        // separator, silently collapsing two distinct pairs into one and
+        // undercounting every metric.
+        $r = MatchScorer::score([['a|b', 'c'], ['a', 'b|c']], [['a|b', 'c'], ['a', 'b|c']]);
+
+        $this->assertSame(2, $r['predicted_pairs']);
+        $this->assertSame(2, $r['true_pairs']);
+        $this->assertSame(2, $r['true_positives']);
+    }
+
+    public function test_a_repeated_ref_in_one_cluster_does_not_create_a_self_pair(): void
+    {
+        // Without array_unique(), the duplicated 'a' in ['a','a','b'] would
+        // pair with itself ("a\0a") on top of pairing with 'b' twice (both
+        // collapsing to the same "a\0b" key), inflating predicted_pairs to 2
+        // instead of the 1 pair the deduplicated cluster ['a','b'] actually has.
+        $r = MatchScorer::score([['a', 'a', 'b']], [['a', 'b']]);
+
+        $this->assertSame(1, $r['predicted_pairs']);
+        $this->assertSame(1, $r['true_positives']);
+        $this->assertSame(1.0, $r['precision']);
+    }
+
+    public function test_a_four_member_cluster_counts_all_six_pairs(): void
+    {
+        // Every other test here uses clusters of at most three, so an
+        // off-by-one in the nested loop bounds (e.g. $j < $n - 1) would still
+        // pass them all. A 4-member cluster has 4 choose 2 = 6 pairs.
+        $r = MatchScorer::score([['a', 'b', 'c', 'd']], [['a', 'b', 'c', 'd']]);
+
+        $this->assertSame(6, $r['true_pairs']);
+        $this->assertSame(6, $r['predicted_pairs']);
+        $this->assertSame(6, $r['true_positives']);
+    }
 }

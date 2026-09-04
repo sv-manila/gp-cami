@@ -56,8 +56,16 @@ class MatchScorer
     }
 
     /**
-     * Every unordered within-cluster pair, keyed "a|b" with the refs sorted so
-     * the key is order-independent.
+     * Every unordered within-cluster pair, keyed on the two refs joined by a
+     * null byte, with the refs sorted so the key is order-independent.
+     *
+     * A printable separator like "|" is not safe here: a ref is arbitrary
+     * data (an ssn_hash, an email, whatever the fixture holds) and can itself
+     * contain the separator, so two different pairs can produce the same
+     * key — cluster ['a|b','c'] and cluster ['a','b|c'] both key to "a|b|c"
+     * under a naive '|' join. That silently collapses two pairs into one
+     * array entry and undercounts every metric. A null byte cannot appear in
+     * a ref, so joining on "\0" instead makes the key collision-free.
      *
      * @param  list<list<string>>  $clusters
      * @return array<string,true>
@@ -71,7 +79,7 @@ class MatchScorer
             $n = count($members);
             for ($i = 0; $i < $n; $i++) {
                 for ($j = $i + 1; $j < $n; $j++) {
-                    $out[$members[$i].'|'.$members[$j]] = true;
+                    $out[$members[$i]."\0".$members[$j]] = true;
                 }
             }
         }
