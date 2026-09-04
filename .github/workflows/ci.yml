@@ -24,7 +24,6 @@ jobs:
           --health-retries=10
 
     env:
-      COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH_JSON }}
       GP_TEST_DB_HOST: 127.0.0.1
       GP_TEST_DB_PORT: 3306
       GP_TEST_DB_DATABASE: gp_cami_test

@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The repo has **no `vendor/` directory** as checked out. Every task begins from a working `composer install`.
-- **`composer install` needs credentials.** `streamlineverify/security` and `streamlineverify/sv` resolve from private `git@github.com:streamlineverify/*` repos. Locally that means an `auth.json` (already gitignored) or an SSH key with access to the `streamlineverify` org. In CI it means a `COMPOSER_AUTH` secret — the default `GITHUB_TOKEN` for `sv-manila/gp-cami` cannot read them and `composer install` will 404 without it.
+- **`composer install` needs no credentials.** As originally written this plan said it did — `streamlineverify/security` was a private dependency. It was used for exactly one constant, and commit `e64f73d` replaced it by replicating CAMI's own key resolution inline. gp-cami now depends only on public packagist packages (Laravel, Sanctum, Tinker, Predis), so CI needs no `COMPOSER_AUTH` secret. See Amendments.
 - **The harness is MySQL, not SQLite, and this is not negotiable.** The schema reuses index names across tables — `idx_identity` appears on `gp_source_link:68`, `gp_edge:81`, `gp_attribute:110`, `gp_identity_credential:128`, `gp_identity_exclusion:148`, `gp_address:176`, `gp_license:192` and `gp_board_action`; `idx_ssn`, `idx_npi`, `idx_dea`, `idx_name_dob`, `idx_zip`, `uq_action` and `idx_type_value` are each duplicated too. MySQL scopes index names per table; **SQLite scopes them per database**, so `migrate` dies at the second `idx_identity` with `index idx_identity already exists`. Renaming twenty-plus indexes on a live 13M-row hub to suit a test harness is the wrong trade.
 - Tests must never touch the real hub. `phpunit.xml` points `GP_DB_HOST`/`SRC_DB_HOST` at `127.0.0.1:1` deliberately; **do not remove or repoint those lines**. `HubTestCase` builds its connection from a *separate* `GP_TEST_DB_*` set and **skips** the test when they are absent, so a machine without a test MySQL gets skips rather than accidental writes.
 - `SqlBackfill` is raw MySQL and could now be tested, but is out of scope here — this plan covers the per-row path. Set-based parity is Plan 8.
@@ -185,7 +185,7 @@ No test in the repo has ever exercised the resolver, because every hub connectio
 composer install
 ```
 
-Expected: `vendor/` created, "Generating optimized autoload files". If it fails on `streamlineverify/security` with a 404, you are missing private-repo credentials — see Global Constraints.
+Expected: `vendor/` created, "Generating optimized autoload files". No credentials are required — every dependency is public (see Global Constraints).
 
 - [ ] **Step 2: Create the scratch schema**
 
@@ -1448,19 +1448,11 @@ git commit -m "feat(eval): add gp:eval and gate the resolver on the labeled set"
 - Consumes: `composer install`, `vendor/bin/pint`, `vendor/bin/phpunit`.
 - Produces: a required status check.
 
-- [ ] **Step 1: Add the composer auth secret**
+- [ ] **Step 1: Nothing to do — no composer secret is needed**
 
-`streamlineverify/security` and `streamlineverify/sv` are private and the default `GITHUB_TOKEN` cannot read them. Create a fine-grained PAT with read access to both, then:
-
-```bash
-gh secret set COMPOSER_AUTH_JSON --repo sv-manila/gp-cami
-```
-
-Paste, when prompted:
-
-```json
-{"github-oauth":{"github.com":"<the PAT>"}}
-```
+This step originally created a `COMPOSER_AUTH_JSON` secret, because `streamlineverify/security`
+was a private dependency. Commit `e64f73d` removed it (see Amendments), so every dependency is
+public and `composer install` runs unauthenticated. Skip to Step 2.
 
 - [ ] **Step 2: Write the workflow**
 
@@ -1493,7 +1485,6 @@ jobs:
           --health-retries=10
 
     env:
-      COMPOSER_AUTH: ${{ secrets.COMPOSER_AUTH_JSON }}
       GP_TEST_DB_HOST: 127.0.0.1
       GP_TEST_DB_PORT: 3306
       GP_TEST_DB_DATABASE: gp_cami_test
@@ -1598,8 +1589,8 @@ to exactly `auto_merge_at`. The floor rises as calibration lands.
   new command.
 - `scripts/baseline-key-mix.sql` records the pre-change key mix; the numbers are
   in `docs/EVALUATION.md` and size the blast radius of the SSN removal in plan 2.
-- Needs a `COMPOSER_AUTH_JSON` repo secret for the private `streamlineverify/*`
-  packages.
+- No composer secret required: `e64f73d` removed the last private dependency, so
+  every package resolves from public packagist.
 EOF
 )"
 ```
@@ -1627,6 +1618,16 @@ This document was revised after a final whole-branch code review found it still
 described defects that had already been fixed in the shipped code — it had not
 been kept in sync as those per-task fixes landed. Corrections:
 
+- **Composer credentials (originally Task 7 Step 1 and a Global Constraint).** The plan assumed
+  `streamlineverify/security` and `streamlineverify/sv` were private dependencies needing a CI
+  secret. `sv` was never actually required at all, and `security` was used for exactly one
+  constant — `LocalStrategy::getKey()` returns the literal `F1CB3D8DCE44E` and ignores its
+  argument. Commit `e64f73d` replicates CAMI's own resolution inline (`subject` +
+  `subject_attribute` + `subject_id IS NULL` + `status`, dispatching on the row's `manager`)
+  and drops the package. That also fixed a real mismatch: gp-cami had been filtering on
+  `subject_attribute` alone, so it could select a different key row than CAMI and every
+  `ssn_hash` would silently stop matching. Lock went 122 -> 78 production packages, no private
+  repos remain, and CI needs no secret.
 - **Schema guard (originally ~line 348).** Changed `str_contains($database, 'test')`
   to `str_starts_with($database, 'gp_') && str_contains($database, 'test')`. The
   substring-only check admits `streamline_test`, a real database on the same
