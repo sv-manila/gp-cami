@@ -16,7 +16,7 @@ Read this before executing any plan.
 | 1 | Foundation — eval set, scorer, resolver harness, CI | `2026-09-03-gpp-conformance-foundation.md` | 7 | — | 
 | 2 | SSN removal | `…-ssn-removal.md` | 9 | 1 |
 | 3a | SCD-2 versioning — schema + per-row paths | `…-scd2-versioning.md` | 10 | 1 |
-| 3b | SCD-2 set-based parity | `…-scd2-set-based-parity.md` | ~5 | 3a |
+| 3b | SCD-2 set-based parity | `…-scd2-set-based-parity.md` | 8 | 3a |
 | 4 | Individual vs entity | `…-individual-vs-entity.md` | 10 | 1, 3a, **5** |
 | 5 | Match keys & data quality | `…-match-keys-and-data-quality.md` | 10 | 1 |
 | 5b | Pass B blocking | `…-pass-b-blocking.md` | 6 | 5 |
@@ -39,8 +39,16 @@ Plan 4 added a dependency on plan 5 that its brief did not anticipate: the entit
 Dependencies permit several orders. This one is canonical:
 
 ```
-1 (done) → 5 → 2 → 3a → 3b → 5b → 4 → 6 → 7 → 8
+1 (done) → 5 → 3a → 3b → 2 → 5b → 4 → 6 → 7 → 8
 ```
+
+**Revised 2026-09-04: 3a and 3b now precede plan 2.** Plan 3b argued this and it is right on all three
+counts. Plan 2's `SetBackfillParityTest` drives `indexStaging()` and `resolveDeterministic()` under
+`HubTestCase`, both of which issue DDL — so without 3b's Task 1 harness it silently commits its
+fixture and pollutes the process (the same defect class as `cf38efd`). Plan 2's Task 7 column drop is
+gated on a production measurement nobody here can obtain, and 3b must not queue behind that. And
+after 3b, plan 2's `SetFinalizer`/`SqlBackfill` edits still apply as written. Plan 3b carries an
+edit-by-edit table for the reverse order if it is ever forced.
 
 **Why 5 before 2, when plan 2 is the smaller change.** Plan 2 deletes `ssn_hash`, the strongest
 deterministic key. Plan 5 supplies the compensating ones (MMIS and DEA promoted to resolve-time
@@ -206,3 +214,73 @@ asserted in the shared authoring brief.
 | "Exclusions are never deleted" is unimplemented | **Already holds, vacuously.** Neither `Engine::rollupExclusions()` nor `SqlBackfill::rollup()` ever deletes an exclusion; only credentials have a retire path. |
 | A long org name breaks `AliasIndexer` | **Directionally right, mislocated.** Both alias columns are `varchar(100)`; the mismatch is `employee_additional_info.value` at `varchar(255)`, so it breaks at staging (`stg_person_alias.first_name`) first. Untriggered in dev, live in production. |
 | `streamlineverify/sv` is a dependency | **False.** Declared as a repository, never required, never imported. `security` was the only private package and `e64f73d` removed it. |
+
+---
+
+## 9. Live bugs found while planning — actionable independently of any plan
+
+Each verified against the running code or the live database. None was introduced by this programme;
+all were found by looking closely enough to write a plan.
+
+**`ProbabilisticResolver::sharesExclusionRegistry()` ignores its input record.**
+```php
+private function sharesExclusionRegistry(object $p, int $identityId): bool
+{
+    $regs = $this->hub()->table('gp_identity_exclusion')->where('identity_id', $identityId)
+        ->whereNotNull('registry')->pluck('registry');
+    return $regs->isNotEmpty();          // $p is never used
+}
+```
+It is named "shares" and tests nothing of the kind: the `exclusion_share` weight (0.07) fires whenever
+the *candidate* identity carries any exclusion at all. For individuals this inflates Pass B scores.
+For entities it is worse, because plan 4 makes `auto_match` reachable — a pair could auto-merge on
+name + address + zip plus *any* exclusion row, and an `auto_match` bind skips `logReview()`, so it
+never surfaces for review. Owner: plan 5b or 6. Plan 4's claims about entity Pass B behaviour rest on
+this leg working as named and must be restated or the leg fixed.
+
+**Set-based `enrich()` inserts a duplicate row on every run when a unique-key part is NULL.**
+MySQL treats NULLs as distinct inside a unique index, so `ON DUPLICATE KEY UPDATE` never fires.
+Measured on `gp_cami_test`: three identical inserts into `gp_license` with a NULL
+`certification_state` produced **3 rows**; the same with non-null values produced **1**. `gp_address`
+behaves identically, and `uq_addr` has **four** nullable parts (`address1`, `city`, `state`, `zip`),
+so any address missing a state or zip duplicates on every bulk run. Consequence: `license_count` and
+`address_count` on `gp_identity_profile` are inflated in any hub that has been backfilled more than
+once. Plan 3b fixes it in code with `<=>` in every key join and notes that `license_count` will
+legitimately *fall*; a schema-level fix needs a `COALESCE` sentinel in the `current_key` and is
+deferred to plan 5.
+
+**`Engine::mergeIdentity()`'s version probe counts a refusal as a merge.** `return $after === $before
+&& $before !== 0 ? 0 : 1;` — a null current-version lookup casts to `0`, so a refused merge returns 1
+and `dedup()`'s `do { … } while ($round > 0)` can spin. Unreachable today because the `! $s || ! $l`
+guard sits upstream, but the guard is upstream of `applyMerge`, not of the probe. Found by plan 4's
+review agent.
+
+**`HubTestCase`'s per-test transaction was not isolation — fixed in `cf38efd`.** Retained here
+because the failure mode recurs: any DDL implicitly commits in MySQL, and Laravel's
+`causedByConcurrencyError()` matches "There is no active transaction", so `rollBack()` returns
+success having rolled back nothing.
+
+---
+
+## 10. Corrections plan 3b makes to plan 3a
+
+3b read 3a closely and found three things wrong in it. Apply these when executing 3a.
+
+- **3a's Task 2 expectation that `$ssn4` and `$term` need `AND current = 1` is wrong.** Both read
+  `stg_person`, which 3a deliberately does not version, so the filter would be a fatal
+  `Unknown column`. Only `$prim` needs it.
+- **Byte-identical profile rows are not achievable for the JSON columns.** MySQL 8 has no `ORDER BY`
+  inside `JSON_ARRAYAGG`, and the per-row path's order is equally unpinned, so the documented
+  invariant narrows to a multiset comparison. Separately, four order-dependent *scalar* picks
+  (primary address, the `dea_number` fallback, `terminated`, `ssn_last_four`) had a tiebreak on the
+  set-based side and none on the per-row side; 3b fixes those so the invariant is true rather than
+  lucky.
+- **`uq_*_current` cannot enforce single-current when a key part is NULL**, because 3a's
+  `current_key` uses NULL-propagating `CONCAT` on purpose. 3b closes it in code; the schema-level fix
+  is deferred to plan 5.
+
+And one verified fact that makes 3b's central design necessary: the hub's text columns are
+`utf8mb4_unicode_ci`, so the **server** considers `'SMITH' = 'Smith'` true while PHP `===` considers
+it false. Without `CAST(… AS BINARY)` on both sides of every comparison, the per-row path would
+version a case change and the set-based path would not — and the canonical spelling would then be
+frozen forever. Measured: `SELECT 'SMITH' = 'Smith'` returns 1; with `CAST(… AS BINARY)`, 0.
