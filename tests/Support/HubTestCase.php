@@ -82,10 +82,60 @@ abstract class HubTestCase extends TestCase
     protected function tearDown(): void
     {
         if (isset($this->systemId)) {
+            // Roll back the fast path, then sweep unconditionally.
+            //
+            // The rollback alone is NOT sufficient isolation, and the failure is
+            // silent. MySQL implicitly commits on any DDL, so one
+            // CREATE TABLE / ALTER anywhere inside the code under test ends the
+            // transaction at the server while Laravel still believes it is open.
+            // SsnHashGuard's "CREATE TABLE IF NOT EXISTS gp_ssn_hash_blocklist"
+            // is exactly that shape and runs from inside resolution, so any test
+            // driving the set-based resolve path trips it.
+            //
+            // Catching the failure is not an option: Laravel's
+            // causedByConcurrencyError() matches "There is no active transaction"
+            // and rollBack() therefore returns without throwing, having rolled
+            // back nothing. Verified — insert, then DDL, then rollBack() leaves
+            // the inserted row committed and reports success.
+            //
+            // So correctness does not depend on detecting it. The sweep runs
+            // every time and costs ~24ms across the 25 gp_/stg_/src_ tables when
+            // they are already empty, which is the normal case because the
+            // rollback did the work. TRUNCATE is the obvious choice here and the
+            // wrong one: it is itself DDL and measured 5,031ms for the same 25
+            // tables, over 200x slower.
             $this->hub()->rollBack();
+            $this->deleteAllHubRows();
         }
 
         parent::tearDown();
+    }
+
+    /**
+     * Delete every row from the hub's own tables, in one sweep.
+     *
+     * The isolation fallback for tearDown(), and safe to call directly from a
+     * test that knowingly commits. Table names come from information_schema
+     * rather than a hardcoded list so a table added by a later migration cannot
+     * be silently missed. The schema has no foreign keys between gp_* tables
+     * (PROJECT_PLAN.md §4 keeps cross-DB integrity in the engine instead), so
+     * delete order does not matter.
+     */
+    protected function deleteAllHubRows(): void
+    {
+        $hub = $this->hub();
+        $database = $hub->getDatabaseName();
+
+        $tables = $hub->select(
+            'SELECT table_name AS t FROM information_schema.tables
+              WHERE table_schema = ?
+                AND (table_name LIKE ? OR table_name LIKE ? OR table_name LIKE ?)',
+            [$database, 'gp\_%', 'stg\_%', 'src\_%']
+        );
+
+        foreach ($tables as $row) {
+            $hub->statement('DELETE FROM `'.$row->t.'`');
+        }
     }
 
     /**
