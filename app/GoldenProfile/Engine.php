@@ -4,9 +4,11 @@ namespace App\GoldenProfile;
 
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Materialize\ProfileMaterializer;
+use App\GoldenProfile\Materialize\SetFinalizer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
 use App\GoldenProfile\Support\SsnHashGuard;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -241,7 +243,7 @@ class Engine
      */
     public function finalizeAllSet(?callable $log = null): void
     {
-        (new \App\GoldenProfile\Materialize\SetFinalizer)->run($log);
+        (new SetFinalizer)->run($log);
     }
 
     /**
@@ -739,7 +741,7 @@ class Engine
             return null;
         }
         try {
-            return \Illuminate\Support\Carbon::parse($v)->toDateTimeString();
+            return Carbon::parse($v)->toDateTimeString();
         } catch (\Throwable) {
             return null;
         }

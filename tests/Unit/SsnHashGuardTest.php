@@ -2,8 +2,8 @@
 
 namespace Tests\Unit;
 
-use App\GoldenProfile\Support\SsnHashGuard;
 use App\GoldenProfile\Support\SsnHasher;
+use App\GoldenProfile\Support\SsnHashGuard;
 use Tests\TestCase;
 
 /**

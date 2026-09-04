@@ -8,6 +8,7 @@ use App\Http\Requests\IdentitySearchRequest;
 use App\Http\Resources\IdentityProfileResource;
 use App\Models\Gp\GpIdentityProfile;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -107,7 +108,7 @@ class IdentitySearchController extends Controller
      * rather than silently dropped — the same approach the dashboard already takes
      * when rendering one of these rows.
      *
-     * @return array{0:\Illuminate\Support\Collection,1:array<string,list<string>>}
+     * @return array{0:Collection,1:array<string,list<string>>}
      */
     private function hydrate(array $ids): array
     {

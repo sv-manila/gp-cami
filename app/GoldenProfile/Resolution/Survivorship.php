@@ -68,7 +68,7 @@ class Survivorship
                 continue;
             }
 
-            $ranked = $candidates->sort(function ($a, $b) use ($order, $srcCol) {
+            $ranked = $candidates->sort(function ($a, $b) use ($order) {
                 $ra = self::authorityRank($order, $a->system_code, $a->reliability_rank);
                 $rb = self::authorityRank($order, $b->system_code, $b->reliability_rank);
                 if ($ra !== $rb) {
@@ -78,6 +78,7 @@ class Survivorship
                 if ($recency !== 0) {
                     return $recency;
                 }
+
                 // Final tiebreak MUST match SetFinalizer's SQL ordering (which ends
                 // in link_id ASC). Without it, a full authority+recency tie is
                 // broken by whatever order the DB returned rows in, so the
@@ -107,7 +108,7 @@ class Survivorship
                 'surviving_value' => is_string($value) ? mb_substr($value, 0, 500) : $value,
                 'system_id' => $winner->system_id,
                 'source_link_id' => $winner->link_id,
-                'rule_applied' => 'authority[' . $winner->system_code . '] + recency',
+                'rule_applied' => 'authority['.$winner->system_code.'] + recency',
                 'decided_at' => $now,
             ];
         }
@@ -136,6 +137,7 @@ class Survivorship
         if ($idx !== false) {
             return $idx;                       // explicit authority order wins
         }
+
         // unknown systems ranked after listed ones, best reliability_rank first
         return 100 - (int) ($reliabilityRank ?? 50);
     }

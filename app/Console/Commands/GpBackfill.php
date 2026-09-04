@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\GoldenProfile\Engine;
 use App\GoldenProfile\SqlBackfill;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\Process\Process;
 
 class GpBackfill extends Command
@@ -106,7 +107,7 @@ class GpBackfill extends Command
         $from = $this->intOpt('from-id');
         $to = $this->intOpt('to-id');
         if ($from === null || $to === null) {
-            $src = \Illuminate\Support\Facades\DB::connection('streamline_local')->table('employees');
+            $src = DB::connection('streamline_local')->table('employees');
             $from ??= (int) $src->min('id');
             $to ??= (int) $src->max('id');
         }

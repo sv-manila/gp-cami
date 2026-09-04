@@ -2,6 +2,7 @@
 
 namespace App\GoldenProfile\Connectors;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -275,7 +276,7 @@ class StreamlineLocalConnector
             return null;
         }
         try {
-            $c = \Illuminate\Support\Carbon::parse($v);
+            $c = Carbon::parse($v);
 
             return $withTime ? $c->toDateTimeString() : $c->toDateString();
         } catch (\Throwable) {

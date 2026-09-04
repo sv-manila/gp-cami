@@ -4,6 +4,7 @@ namespace App\GoldenProfile;
 
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Support\SsnHashGuard;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -381,7 +382,7 @@ class SqlBackfill
     public function enrich(): void
     {
         $this->hub()->statement(
-            "INSERT INTO gp_license
+            'INSERT INTO gp_license
                 (identity_id, license_number, certification_state, certification_board,
                  license_type, license_type_id, registry, is_verified, source_link_id)
              SELECT l.identity_id, spl.license_number, spl.certification_state, spl.certification_board,
@@ -390,7 +391,7 @@ class SqlBackfill
              JOIN stg_person sp ON sp.stg_person_id = spl.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
              GROUP BY l.identity_id, spl.license_number, spl.certification_state, spl.certification_board
-             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)",
+             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)',
             []
         );
 
@@ -410,13 +411,13 @@ class SqlBackfill
         // Multi-valued identifiers (DEA, MMIS). dedup then merges identities
         // that share one — this is how DEA/MMIS act as match keys.
         $this->hub()->statement(
-            "INSERT INTO gp_identity_identifier (identity_id, id_type, id_value, source_link_id)
+            'INSERT INTO gp_identity_identifier (identity_id, id_type, id_value, source_link_id)
              SELECT l.identity_id, spi.id_type, spi.id_value, MIN(l.link_id)
              FROM stg_person_identifier spi
              JOIN stg_person sp ON sp.stg_person_id = spi.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
              GROUP BY l.identity_id, spi.id_type, spi.id_value
-             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)",
+             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)',
             []
         );
     }
@@ -584,7 +585,7 @@ class SqlBackfill
             []
         );
 
-        $this->hub()->statement("UPDATE gp_identity SET merged_into = NULL WHERE merged_into IS NOT NULL", []);
+        $this->hub()->statement('UPDATE gp_identity SET merged_into = NULL WHERE merged_into IS NOT NULL', []);
 
         // Rebuild the key indexes for dedup + finalize.
         $this->addIdentityKeyIndexes();
@@ -689,7 +690,7 @@ class SqlBackfill
             return null;
         }
         try {
-            return \Illuminate\Support\Carbon::parse($v)->toDateTimeString();
+            return Carbon::parse($v)->toDateTimeString();
         } catch (\Throwable) {
             return null;
         }

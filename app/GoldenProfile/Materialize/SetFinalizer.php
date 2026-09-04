@@ -125,11 +125,11 @@ class SetFinalizer
         }
 
         // record_count + last_updated (Survivorship folds these in per identity).
-        $hub->statement("
+        $hub->statement('
             UPDATE gp_identity i
             JOIN ( SELECT identity_id, COUNT(*) c FROM gp_source_link GROUP BY identity_id ) k
               ON k.identity_id = i.identity_id
-            SET i.record_count = k.c, i.last_updated = NOW()");
+            SET i.record_count = k.c, i.last_updated = NOW()');
 
         // Rebuild the key indexes the canonical updates skipped (dedup/sync need them).
         $this->addIdentityKeyIndexes();

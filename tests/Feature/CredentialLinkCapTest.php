@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Exceptions\TooManyCredentialLinksException;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Tests\TestCase;
 
 /**
@@ -19,7 +20,7 @@ class CredentialLinkCapTest extends TestCase
 {
     public function test_exception_is_rendered_as_409_by_the_exception_handler(): void
     {
-        $handler = app(\Illuminate\Contracts\Debug\ExceptionHandler::class);
+        $handler = app(ExceptionHandler::class);
 
         $response = $handler->render(
             request()->instance(),
