@@ -91,13 +91,22 @@ abstract class HubTestCase extends TestCase
     /**
      * migrate:fresh DROPS EVERY TABLE. Getting this connection wrong once would
      * destroy the hub, so the name is checked rather than trusted.
+     *
+     * A substring check on 'test' alone is not enough: the same MySQL server
+     * (192.168.56.22) also hosts a database literally named streamline_test,
+     * which contains 'test' and would pass such a check. A typo'd
+     * GP_TEST_DB_DATABASE could then point straight at it and migrate:fresh
+     * would silently destroy it. Requiring the name to both start with 'gp_'
+     * and contain 'test' admits the intended gp_cami_test while rejecting
+     * streamline_test, streamline_local, streamline_integration, and
+     * admin_dash_sb.
      */
     private function guardAgainstTheRealHub(string $database): void
     {
-        if (! str_contains($database, 'test')) {
+        if (! str_starts_with($database, 'gp_') || ! str_contains($database, 'test')) {
             $this->fail(
                 "refusing to migrate '$database': GP_TEST_DB_DATABASE must be a scratch ".
-                "schema with 'test' in its name (e.g. gp_cami_test)"
+                "schema whose name starts with 'gp_' and contains 'test' (e.g. gp_cami_test)"
             );
         }
     }
