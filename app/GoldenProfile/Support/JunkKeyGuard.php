@@ -5,12 +5,14 @@ namespace App\GoldenProfile\Support;
 use Illuminate\Support\Facades\DB;
 
 /**
- * General placeholder + cardinality guard, parameterized by column. Generalizes
- * SsnHashGuard's cardinality idea rather than extending that class: plan 2
- * deletes SsnHashGuard/SsnHasher entirely (SSN removal), so anything meant to
- * outlive that change cannot depend on them.
+ * General placeholder + cardinality guard, parameterized by column. It
+ * generalized SsnHashGuard's cardinality idea rather than extending that class,
+ * because plan 2 was going to delete SsnHashGuard/SsnHasher entirely (SSN
+ * removal) and anything meant to outlive that change could not depend on them.
+ * That has now happened: both classes are gone and this one is unaffected, which
+ * is the whole reason it was written this way.
  *
- * Two independent checks, same as SSN's:
+ * Two independent checks, the same pair the SSN guard used:
  *  1. Known placeholders (config golden_profile.junk.placeholders.$column) —
  *     exact, but only catches values someone has already identified.
  *  2. Cardinality: a value carried by more than
@@ -24,9 +26,10 @@ use Illuminate\Support\Facades\DB;
  * Deliberately counts distinct PEOPLE in stg_person, not identities in
  * gp_identity: the deterministic tiers mint one identity per distinct value
  * and link every row carrying it, so a filler value ends up on exactly one
- * identity — the damage is invisible from the identity side (see
- * SsnHashGuard's original docblock for the same reasoning, which is why this
- * class keeps it).
+ * identity — the damage is invisible from the identity side. That reasoning was
+ * first written down in SsnHashGuard's docblock; the class is deleted, so this
+ * is now the only place it survives, which is why it is spelled out here in
+ * full rather than cross-referenced.
  */
 class JunkKeyGuard
 {

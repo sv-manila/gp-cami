@@ -8,7 +8,7 @@ use Tests\Support\HubTestCase;
 /**
  * Generalizes SsnHashGuard's cardinality idea (a value carried by implausibly
  * many distinct people cannot be one person's identifier) to any column,
- * config-driven, with no dependency on SsnHashGuard/SsnHasher — plan 2 deletes
+ * config-driven, with no dependency on SsnHashGuard/SsnHasher — plan 2 deleted
  * those files. The placeholder half needs no DB; the cardinality half needs a
  * real hub, hence HubTestCase.
  *

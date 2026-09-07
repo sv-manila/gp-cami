@@ -163,76 +163,16 @@ return [
     ],
 
     /*
-    | SSN handling. CAMI resolves its plaintext key via streamlineverify/security's
-    | KeyManager; gp-cami no longer depends on that package (it was pulled in for
-    | this one constant) and instead replicates its two manager branches inline.
-    | Encryption is non-deterministic (AES-256-CBC, random IV) so matching is on
-    | the sha512 hash, never ciphertext. gp-cami must use the SAME plaintext key
-    | as CAMI or hashes/ciphertext won't align.
+    | There is no SSN block. gp-cami stored a CAMI-encrypted SSN, an ssn_hash and
+    | an ssn_last_four, matched on the hash at 0.99 in Pass A, and screened that
+    | tier for filler values (placeholder_plaintexts + a cardinality cap). All of
+    | it was removed by the GPP conformance programme: Confluence Delivery
+    | Checklist §1 requires that internal verified data stream via CDC and that the
+    | SSN never be stored, and the GPP Data Model has no SSN column in the golden
+    | layer. See docs/RUNNING.md for the removal record — including the measured
+    | filler-SSN figures that justified the guard, which are worth keeping even
+    | though the guard is gone.
     */
-    'ssn' => [
-        'encryption_key_id' => env('GP_SSN_ENCRYPTION_KEY_ID', 1),
-        'store_encrypted' => true,   // parity with streamline_local.social_security_num
-        'match_on' => 'ssn_hash', // sha512(ssn + plaintext_key)
-        // Not read anywhere — the API's withholding of the SSN is enforced
-        // structurally by IdentityProfileResource, which simply never emits
-        // ssn_hash or the ciphertext. Named for the FULL SSN: ssn_last_four is
-        // returned regardless, so reading this as "no SSN data is returned" is
-        // wrong. Kept only as documentation of intent; delete it or wire it, but
-        // do not trust it as a control.
-        'return_full_ssn_in_api' => false,
-
-        // The shared CAMI plaintext key. SsnHasher has always read this path, but
-        // the key was never declared here, so the "explicitly configured key"
-        // branch was dead in every environment and hash() silently returned null.
-        // Local dev leaves this unset and resolves via the streamline_local
-        // encryption_keys registry (LocalStrategy) instead; prod, where the key
-        // lives behind KMS and is not derivable from the source DB, must set
-        // GP_SSN_PLAINTEXT_KEY or SSN matching is unavailable (and now says so).
-        'plaintext_key' => env('GP_SSN_PLAINTEXT_KEY'),
-
-        // The plaintext key for encryption_keys rows with manager = 'local'.
-        // Mirrors LocalStrategy::getKey() from the streamlineverify/security
-        // package, which ignores its argument and returns a hardcoded
-        // constant — CAMI only registers that strategy when app.env is 'local'
-        // or 'integration' (see AppServiceProvider::register()). This is a
-        // local/integration development key ONLY; production keys are held
-        // behind KMS under manager = 'aws' and are not derivable here (see
-        // 'plaintext_key' above / GP_SSN_PLAINTEXT_KEY). Deliberately left
-        // unset in this file and in .env.example — sv-manila/gp-cami is a
-        // PUBLIC repository, so the value is set only in each developer's own
-        // gitignored .env.
-        'local_manager_key' => env('GP_SSN_LOCAL_MANAGER_KEY'),
-
-        /*
-        | Placeholder-SSN safeguard.
-        |
-        | ssn_hash is a 0.99-confidence deterministic key, but CAMI's source data
-        | contains filler SSNs (all-zero, sequential, repeated digits). Every
-        | person sharing a filler value hashes identically, so an unguarded
-        | ssn_hash tier collapses all of them into ONE identity — a false merge
-        | that no later pass undoes. Two independent guards:
-        |
-        |   placeholder_plaintexts - hashed with the live key at run time and
-        |       excluded from the ssn_hash tier. Exact, but needs the key.
-        |   max_identities_per_hash - any ssn_hash carried by more than this many
-        |       distinct PEOPLE upstream — distinct (last_name, first_name,
-        |       date_of_birth) triples in stg_person — is treated as filler and
-        |       skipped. Works with no key at all, and catches fillers not listed
-        |       above. Counting distinct rows in gp_identity instead would never
-        |       fire: the tiers mint one identity per hash, so a filler ends up on
-        |       exactly one identity. See SsnHashGuard.
-        |
-        | Measured on the current hub: 17 filler hashes covering 9,164 distinct
-        | people, the worst single hash carried by 9,072 of them.
-        */
-        'placeholder_plaintexts' => [
-            '000000000', '111111111', '222222222', '333333333', '444444444',
-            '555555555', '666666666', '777777777', '888888888', '999999999',
-            '123456789', '987654321', '012345678',
-        ],
-        'max_identities_per_hash' => 3,
-    ],
 
     /*
     | Run modes (console commands + queued jobs).

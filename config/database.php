@@ -126,8 +126,11 @@ return [
             'engine' => null,
             'options' => extension_loaded('pdo_mysql') ? array_filter([
                 Mysql::ATTR_SSL_CA => env('SRC_MYSQL_ATTR_SSL_CA'),
-                // See the golden_profile note above. Also bounds SsnHasher's key
-                // lookup, which every credential-search with an ssn hits.
+                // See the golden_profile note above. It used to also bound
+                // SsnHasher's key lookup, which every credential-search with an
+                // ssn hit; that class is gone with the SSN removal. The timeout
+                // still matters — every credential-search that resolves an
+                // identity reads credential_matches from this connection.
                 PDO::ATTR_TIMEOUT => (int) env('SRC_DB_CONNECT_TIMEOUT', 3),
             ]) : [],
         ],

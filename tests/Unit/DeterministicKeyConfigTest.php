@@ -86,14 +86,4 @@ class DeterministicKeyConfigTest extends TestCase
             'every ->value() in the deterministic match path needs a deterministic ORDER BY',
         );
     }
-
-    public function test_ssn_placeholder_guard_is_configured(): void
-    {
-        $placeholders = config('golden_profile.ssn.placeholder_plaintexts');
-
-        $this->assertIsArray($placeholders);
-        $this->assertNotEmpty($placeholders, 'an empty filler list disables the exact half of the guard');
-        $this->assertContains('000000000', $placeholders);
-        $this->assertGreaterThanOrEqual(1, (int) config('golden_profile.ssn.max_identities_per_hash'));
-    }
 }
