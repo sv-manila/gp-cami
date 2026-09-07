@@ -37,3 +37,26 @@ WHERE i.status = 'active'
 --    recorded in config/golden_profile.php.
 SELECT COUNT(*) AS filler_hashes, COALESCE(SUM(distinct_people), 0) AS people_affected
 FROM gp_ssn_hash_blocklist;
+
+-- 6. The number that predicts the future: how many EXTRA identities a
+--    from-scratch rebuild produces once the ssn_hash tier is gone.
+--
+--    Plan 2 retains existing links (see the plan's design decision 3), so
+--    removing the tier fragments nothing at the moment it lands. The cost is
+--    deferred to the next full rebuild, which will mint one identity per source
+--    row for every identity that had no other binding evidence. That delta is
+--    (rows on ssn-only identities) - (count of those identities).
+--
+--    Read alongside query 3: query 3 says how many identities change shape,
+--    this says by how much. An identity bound only by ssn_hash but holding a
+--    single source row contributes 0 — it was already effectively a singleton.
+SELECT COUNT(*)               AS ssn_only_identities,
+       COALESCE(SUM(links),0) AS ssn_only_links,
+       COALESCE(SUM(links),0) - COUNT(*) AS projected_extra_identities
+FROM (
+    SELECT identity_id, COUNT(*) AS links
+    FROM gp_source_link
+    GROUP BY identity_id
+    HAVING SUM(match_key <> 'ssn_hash') = 0
+       AND SUM(match_key =  'ssn_hash') > 0
+) t;

@@ -2,7 +2,11 @@
 
 ## Baseline — before the GPP conformance programme
 
-**Not yet measured.** Run `scripts/baseline-key-mix.sql` against the `golden_profile` hub and fill the table below.
+**Not yet measured.** `scripts/baseline-key-mix.sql` has six queries; run it against
+the `golden_profile` hub and fill the table below. Every query has been verified to
+parse and execute against the scratch schema, which returns zeros — that is the only
+verification available here, because nobody in this environment has production hub
+credentials.
 
 | Metric | Value |
 |---|---|
@@ -16,17 +20,50 @@
 | Identities carrying an `ssn_hash` | PENDING |
 | **Identities bound only by `ssn_hash`** | PENDING |
 | **At-risk identities** (multi-row, no other key) | PENDING |
+| **Projected extra identities after a rebuild** | PENDING |
 | Filler hashes on the blocklist | PENDING |
 
-**Reading this:** the two bold rows size what Plan 2 (SSN removal) will fragment.
-Every identity in "bound only by `ssn_hash`" loses its binding evidence and splits
-into one identity per source row unless another key covers it.
+**Reading this:** the three bold rows size what plan 2 costs. Plan 2 **retains** every
+existing `gp_source_link` row, so nothing fragments when the tier is removed —
+`DeterministicResolver::resolve()` returns an existing link's identity before it
+consults any tier, so `gp:sync` keeps producing today's clustering indefinitely. The
+cost is deferred to the next from-scratch rebuild, which will produce "projected extra
+identities" more identities than the hub holds now. That number, not the link count, is
+the one to act on.
 
-**Status: outstanding.** Nobody has run `scripts/baseline-key-mix.sql` yet — it
-needs production hub credentials that are not available in this environment.
-**Plan 2 is blocked until this table is filled in**, because Plan 2 sizes the
-blast radius of removing the `ssn_hash` tier from these numbers; without them
-there is no way to know how many identities the removal will fragment.
+## Plan 2 rollout decision
+
+`P` = projected extra identities ÷ active identities.
+
+| `P` | Decision |
+|---|---|
+| < 0.5% | Proceed. Fragmentation on the next rebuild is noise; no sequencing change. |
+| 0.5% – 5% | Proceed. Land plan 5's compensating keys (MMIS resolve-time tier, `(state, provider#)`, name+state blocking) **before the next full rebuild**, and schedule that rebuild after plan 5. |
+| > 5% | Proceed, and treat the rebuild as gated: plan 5 becomes a prerequisite for it, and the programme order after plan 2 is re-cut to put plan 5 next. Say so at the design review. |
+
+**Every row of that table says "proceed."** This is a compliance decision, not a
+performance one — the Delivery Checklist §1 requirement does not become conditional on
+a row count, and the removal is not up for renegotiation. What `P` decides is *when the
+next full rebuild happens* and *what must land first*, because a rebuild is the only
+event at which the deferred fragmentation is actually paid.
+
+Two corrections to what this section used to say, both of which mattered:
+
+- It said "**Plan 2 is blocked until this table is filled in**". That was wrong. The
+  *code* is not blocked — tasks 2 to 7 and 9 are local and tested, and land regardless.
+  The *hub rollout* is what the number gates: running Task 7's column drop and Task 8's
+  provenance script against the shared hub without knowing the projection means not
+  knowing what the next rebuild produces.
+- The old table had no way to express the cost, only the count of affected identities.
+  Query 6 supplies it: `projected_extra_identities` is the source rows those identities
+  hold minus the identities themselves, so a single-row identity bound only by
+  `ssn_hash` contributes 0 — it was already effectively a singleton.
+
+**If the measurement is still outstanding when the code is ready to merge** — which is
+the state as of this commit — merge the code and the migration, and hold **Task 8's
+provenance script**, the only step whose output depends on the number. Record the date
+the script was handed over and to whom. As of 2026-09-07 it has not been handed over;
+there is nobody in this environment to hand it to.
 
 ## Achieved — measured on this branch
 
