@@ -53,6 +53,25 @@ return [
         'max_identities_per_value' => [
             'npi' => 3,
         ],
+        /*
+        | Name-field placeholders. Stateless — the string itself is the signal,
+        | so no cardinality query is needed and none is run. Applied only to
+        | name-shaped fields (see StreamlineLocalConnector::cleanName), never to
+        | address or city: "UNKNOWN" is unambiguous junk in a surname and can be
+        | literal data elsewhere.
+        |
+        | AREALNULL is not hypothetical. It is a null sentinel the source data
+        | actually emits — verified in 22 of the 84 rows of
+        | streamline_local.exclusion_records, as the literal value of the
+        | date_deleted key inside the unstructured per-registry `match` JSON.
+        | It has NOT been observed in a name field, so listing it here is
+        | defensive: the sources demonstrably write this string where a NULL
+        | belongs, and a name column is where that would silently become a
+        | match key. 00-PROGRAMME.md §5 assigns it to this list.
+        */
+        'name_placeholders' => [
+            'INFORMATION NOT AVAILABLE', 'NOT AVAILABLE', 'UNKNOWN', 'N/A', 'NONE', 'AREALNULL',
+        ],
     ],
 
     /*

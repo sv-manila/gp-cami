@@ -70,9 +70,9 @@ class StreamlineLocalConnector
             'source_id' => $emp->id,
             'account_id' => $accountId ?: null,
             'employeelist_id' => $emp->employeelist_id ?: null,
-            'first_name' => $this->clean($emp->first_name),
-            'middle_name' => $this->clean($emp->middle_name),
-            'last_name' => $this->clean($emp->last_name),
+            'first_name' => $this->cleanName($emp->first_name),
+            'middle_name' => $this->cleanName($emp->middle_name),
+            'last_name' => $this->cleanName($emp->last_name),
             'date_of_birth' => $this->date($emp->date_of_birth),
             'ssn_hash' => $emp->ssn_hash ?: null,          // ingest as-is (global key)
             'ssn_last_four' => $emp->ssn_last_four ?: null,
@@ -143,8 +143,8 @@ class StreamlineLocalConnector
     {
         $aliases = [];
         $addAlias = function ($type, $first, $last) use (&$aliases) {
-            $first = $this->clean($first);
-            $last = $this->clean($last);
+            $first = $this->cleanName($first);
+            $last = $this->cleanName($last);
             if ($first || $last) {
                 $aliases[] = ['alias_type' => $type, 'first_name' => $first, 'last_name' => $last];
             }
@@ -279,6 +279,26 @@ class StreamlineLocalConnector
         $v = is_string($v) ? trim($v) : $v;
 
         return ($v === '' || $v === null) ? null : $v;
+    }
+
+    /**
+     * clean() trims and nulls empty strings for every text column; this is the
+     * narrower, name-specific half of junk screening (Delivery Checklist:
+     * "all-zero NPI, 'INFORMATION NOT AVAILABLE'"). Kept separate from clean()
+     * on purpose — a value like "UNKNOWN" is unambiguous junk in a name field
+     * but not necessarily in every other column, so this is applied only where
+     * this plan has confirmed it belongs: first/middle/last name and
+     * name-shaped alias fields.
+     */
+    private function cleanName(?string $v): ?string
+    {
+        $v = $this->clean($v);
+        if ($v === null) {
+            return null;
+        }
+        $placeholders = array_map('strtoupper', (array) config('golden_profile.junk.name_placeholders', []));
+
+        return in_array(strtoupper($v), $placeholders, true) ? null : $v;
     }
 
     private function date(?string $v, bool $withTime = false): ?string
