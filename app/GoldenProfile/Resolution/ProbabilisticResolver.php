@@ -100,6 +100,14 @@ class ProbabilisticResolver
             })
             ->join('gp_identity as i', 'i.identity_id', '=', 'l.identity_id')
             ->where('sp.block_key', $p->block_key)
+            // i.current = 1 as well as i.status = 'active'. Both are load-bearing:
+            // `status` excludes a merged identity, `current` excludes a superseded
+            // VERSION of a live one — and a superseded version is still 'active',
+            // so without the second filter a merged-away identity re-enters the
+            // candidate set through its own history. In the review band Pass B
+            // BINDS to its best candidate, so that is a false merge produced
+            // silently.
+            ->where('i.current', 1)
             ->where('i.status', 'active')
             ->where(fn ($q) => $q->where('sp.source_id', '!=', $p->source_id)->orWhere('sp.system_id', '!=', $this->systemId))
             ->distinct()->pluck('l.identity_id');
@@ -115,7 +123,17 @@ class ProbabilisticResolver
         $identities = collect();
         foreach ($candidateIds->chunk(1000) as $batch) {
             $identities = $identities->merge(
-                $this->hub()->table('gp_identity')->whereIn('identity_id', $batch->all())->get()
+                // Filtered here too, not just in the candidate query above: this
+                // hydrate is what score() actually reads, and an unfiltered
+                // whereIn returns EVERY version of each candidate — so one
+                // identity would be scored once per version and could be bound to
+                // through a superseded row even after the candidate query stopped
+                // offering it. It carried no status filter at all before.
+                $this->hub()->table('gp_identity')
+                    ->whereIn('identity_id', $batch->all())
+                    ->where('current', 1)
+                    ->where('status', 'active')
+                    ->get()
             );
         }
 
@@ -208,7 +226,12 @@ class ProbabilisticResolver
         if ($stg->isEmpty()) {
             return [false, false];
         }
-        $gp = $this->hub()->table('gp_address')->where('identity_id', $identityId)->get();
+        // Current addresses only. An address the identity has moved away from is
+        // not evidence that an incoming record describes the same person — it is
+        // evidence about where they used to be, and scoring it would let stale
+        // addresses accumulate score forever.
+        $gp = $this->hub()->table('gp_address')
+            ->where('identity_id', $identityId)->where('current', 1)->get();
         $addrHit = false;
         $zipHit = false;
         foreach ($stg as $a) {
@@ -228,7 +251,8 @@ class ProbabilisticResolver
     private function sharesExclusionRegistry(object $p, int $identityId): bool
     {
         // if this source row's employee has an exclusion registry already on the identity
-        $regs = $this->hub()->table('gp_identity_exclusion')->where('identity_id', $identityId)
+        $regs = $this->hub()->table('gp_identity_exclusion')
+            ->where('identity_id', $identityId)->where('current', 1)
             ->whereNotNull('registry')->pluck('registry');
 
         return $regs->isNotEmpty();

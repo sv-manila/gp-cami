@@ -28,7 +28,13 @@ class GpNpiAudit extends Command
     {
         $hub = DB::connection('golden_profile');
 
-        $withNpi = $hub->table('gp_identity')->where('status', 'active')->whereNotNull('npi')
+        // current = 1 as well as status = 'active'. Without it this counts every
+        // VERSION of every identity, so an identity re-versioned three times is
+        // reported three times and the retroactive-split exposure this command
+        // exists to size comes out inflated. Added when plan 3a versioned
+        // gp_identity — the command predates versioning.
+        $withNpi = $hub->table('gp_identity')
+            ->where('current', 1)->where('status', 'active')->whereNotNull('npi')
             ->select('identity_id', 'npi')->get();
 
         $invalid = $withNpi->filter(fn ($r) => ! NpiValidator::isValid((string) $r->npi));

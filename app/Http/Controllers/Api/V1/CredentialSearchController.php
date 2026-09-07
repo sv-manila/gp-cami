@@ -106,8 +106,11 @@ class CredentialSearchController extends Controller
         }
 
         if ($r->filled('license_number')) {
+            // Current licence versions only: narrowing on a licence an identity no
+            // longer holds would resolve the request to the wrong person.
             $ids = DB::connection('golden_profile')->table('gp_license')
                 ->where('license_number', $r->input('license_number'))
+                ->where('current', 1)
                 ->pluck('identity_id');
             $q->whereIn('identity_id', $ids);
         }
@@ -182,9 +185,28 @@ class CredentialSearchController extends Controller
         $chunkSize = (int) config('golden_profile.credential_search.link_chunk_size', 1000);
         $maxLinks = (int) config('golden_profile.credential_search.max_links', 10000);
 
+        // current = 1 is what keeps three separate things true, all of them
+        // measured rather than theoretical:
+        //
+        //   1. max_links (10,000) is counted from this query. Unfiltered, an
+        //      identity whose credentials have been re-screened three times shows
+        //      three times the links and starts throwing
+        //      TooManyCredentialLinksException where it never used to.
+        //   2. Each chunk of this query becomes a whereIn against the REMOTE CAMI
+        //      source, and config/golden_profile.php records the cliff that makes
+        //      the chunk size a correctness constraint rather than a tuning knob
+        //      (chunk 1000 = 8.9s, chunk 5000 = 360.7s on identity 59). Version
+        //      rows would push a 1,000-link chunk's worth of current links into a
+        //      3,000-placeholder statement.
+        //   3. chunkById below needs a strictly unique cursor. credential_match_id
+        //      is unique per (system_id, credential_match_id) only among CURRENT
+        //      rows — a guarantee uq_cred_current enforces in the database, which
+        //      is why that index was built as a unique on a generated column rather
+        //      than left to the write paths to respect.
         $linkQuery = DB::connection('golden_profile')->table('gp_identity_credential')
             ->where('identity_id', $identity->identity_id)
             ->where('registry', $r->input('registry'))
+            ->where('current', 1)
             ->whereIn('match_summary_status_code', $codes);
 
         // Refuse rather than hang. The winner depends on dates held on a different
