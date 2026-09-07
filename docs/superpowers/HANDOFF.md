@@ -13,13 +13,13 @@ memory.
 scope decisions were made by the project owner and are **not open**: conformance stays inside the
 Laravel/MySQL hub (no lakehouse, no ML matcher, no external government feeds), and where the code
 and the docs contradict each other on SSN storage and SCD-2 versioning, **the code changes to match
-the docs**. Plan 1 is built and green. Eleven further plan documents are written and committed.
-Three more are specified but not written. Nothing has been pushed.
+the docs**. Plan 1 is built and green. Twelve further plan documents are written and committed.
+Two more are specified but not written. Nothing has been pushed.
 
 ## 2. Branch state
 
 ```
-branch  feat/eval-harness   (26 commits ahead of master @ 17d383d)
+branch  feat/eval-harness   (29 commits ahead of master @ 17d383d)
 suite   95 tests, 270 assertions, 0 skipped
 style   vendor/bin/pint --test clean
 tree    clean
@@ -30,7 +30,7 @@ Verify with:
 
 ```bash
 cd /c/projects/dramiel/gp-cami
-git log --oneline 17d383d..HEAD | wc -l      # expect 26
+git log --oneline 17d383d..HEAD | wc -l      # expect 29
 vendor/bin/phpunit --fail-on-skipped         # expect 95/95
 ```
 
@@ -89,6 +89,7 @@ Committed under `docs/superpowers/`:
 | `compliance-{A,B,C}-*.md` | the three per-requirement audit tables, with quotes and citations |
 | `plans/2026-09-03-*.md` (10 files) | plans 2, 3a, 3b, 4, 5, 5b, 6, 7, 8 and 1 |
 | `plans/2026-09-04-gpp-conformance-explainability-and-reversibility.md` | plan 9 |
+| `plans/2026-09-04-gpp-conformance-measurement-and-monitoring.md` | plan 11 |
 
 **Where a plan disagrees with `00-PROGRAMME.md`, the programme file wins.**
 
@@ -113,16 +114,15 @@ Two constraints that are not obvious and are argued in `00-PROGRAMME.md` §2:
 
 ## 7. What remains, in priority order
 
-### Not written — three plans
+### Not written — two plans
 
 | # | Plan | Why it is next / why it can wait |
 |---|---|---|
-| **11** | **Measurement & monitoring** | **Do this first.** Its run-diff is the audit's top buildable-now item: six plans change resolution on a 13.38M-identity hub and the only regression detector is a 13-pair fixture. Needs no production access and no new decision. Also covers the alerting half of the quality gates, `ingest_manifest`/`data_lineage` adapted honestly, and Success Metrics tracking. Read Confluence page **4067295233**. |
 | 10 | Credential cache | Hinges on an open decision (§8) that could make most of it moot. |
 | 12 | Bi-temporal validity | Hinges on whether the source carries business-validity dates at all. Plan 7 already investigated exclusions and deferred with cause; licences are unknown. |
 
-Each new plan takes the next free migration prefix: plan 11 → `2026_09_12_*`, plan 10 →
-`2026_09_11_*`, plan 12 → `2026_09_13_*`. Plan 9 took `2026_09_10_*`.
+Each new plan takes the next free migration prefix: plan 10 → `2026_09_11_*`, plan 12 →
+`2026_09_13_*`. Plan 9 took `2026_09_10_*` and plan 11 took `2026_09_12_*`.
 
 ### Not applied — four conformance edits to existing plans
 
