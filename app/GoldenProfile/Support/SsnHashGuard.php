@@ -96,14 +96,29 @@ class SsnHashGuard
         $hub = $this->hub();
         $cap = $this->maxIdentitiesPerHash();
 
-        $hub->statement('CREATE TABLE IF NOT EXISTS gp_ssn_hash_blocklist (
-            ssn_hash VARCHAR(255) NOT NULL,
-            reason VARCHAR(32) NOT NULL,
-            distinct_people INT NOT NULL DEFAULT 0,
-            PRIMARY KEY (ssn_hash)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+        // CREATE TABLE and TRUNCATE both cause an implicit COMMIT in MySQL, and
+        // this method sits on resolveDeterministic()'s path — so running either
+        // while a caller has a transaction open commits it. Create only when the
+        // table is genuinely absent (checked, not IF NOT EXISTS, which commits
+        // regardless), and clear with DELETE, which is transactional. The
+        // blocklist holds a few thousand rows at most and has no AUTO_INCREMENT,
+        // so TRUNCATE bought nothing here.
+        $exists = $hub->selectOne(
+            'SELECT 1 FROM information_schema.tables
+             WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
+            ['gp_ssn_hash_blocklist'],
+        );
 
-        $hub->table('gp_ssn_hash_blocklist')->truncate();
+        if (! $exists) {
+            $hub->statement('CREATE TABLE gp_ssn_hash_blocklist (
+                ssn_hash VARCHAR(255) NOT NULL,
+                reason VARCHAR(32) NOT NULL,
+                distinct_people INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (ssn_hash)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+        }
+
+        $hub->table('gp_ssn_hash_blocklist')->delete();
 
         // Cardinality-detected fillers.
         $hub->statement(

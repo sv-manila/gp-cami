@@ -87,8 +87,17 @@ class SetFinalizer
         // rebuild once at the end (same trick resolveDeterministic uses for the
         // residual insert). dedup already ran (it needed them); nothing between
         // here and the rebuild needs them.
-        $this->dropIdentityKeyIndexes();
+        $this->withoutIdentityKeyIndexes(function () use ($hub, $rank) {
+            $this->survivorshipBody($hub, $rank);
+        });
+    }
 
+    /**
+     * The per-field canonical pass, extracted so withoutIdentityKeyIndexes() can
+     * wrap it. Task 3 replaces this whole body with one all-fields versioned pass.
+     */
+    private function survivorshipBody($hub, $rank): void
+    {
         foreach (self::IDENTITY_FIELDS as $canonical => $srcCol) {
             // Ranked candidates for this field: non-blank staged values, best
             // authority then newest, link_id as a deterministic final tiebreak.
@@ -134,8 +143,6 @@ class SetFinalizer
               ON k.identity_id = i.identity_id
             SET i.record_count = k.c, i.last_updated = NOW()');
 
-        // Rebuild the key indexes the canonical updates skipped (dedup/sync need them).
-        $this->addIdentityKeyIndexes();
     }
 
     /** gp_identity key indexes — mirror of SqlBackfill::IDENTITY_KEY_INDEXES. */
@@ -156,6 +163,54 @@ class SetFinalizer
         'idx_dea' => 'dea_number, `current`',
         'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob, `current`',
     ];
+
+    /**
+     * Run $fn with gp_identity's five key indexes dropped, then rebuilt.
+     *
+     * Why this still pays after SCD-2: 2026_09_04_000100_add_scd2_versioning
+     * appended `current` to all five, so the flip (UPDATE … SET current = 0)
+     * rewrites one entry in every one of them per superseded identity, and the
+     * insert that follows builds five entries per new version. The reason
+     * changed; the conclusion did not — 9c3f11c measured the un-dropped version
+     * of this pass at "~tens of min per field".
+     *
+     * uq_identity_current is deliberately NOT dropped. It is the only thing that
+     * turns "two current versions of one identity" from a silent duplicate row
+     * into a duplicate-key error, and the flip-then-insert ORDER exists because
+     * it is enforced. Dropping it for speed would remove the guarantee at exactly
+     * the moment this code starts depending on it.
+     *
+     * Skipped entirely while a transaction is open. ALTER TABLE causes an implicit
+     * COMMIT in MySQL, so dropping an index mid-transaction commits whatever the
+     * caller had open — for HubTestCase that is the fixture of the running test,
+     * which then leaks into every later test in the process without anything
+     * failing. Inside a transaction the data set is a handful of rows and the
+     * optimisation is worth nothing, so skipping loses nothing either.
+     */
+    private function withoutIdentityKeyIndexes(callable $fn): void
+    {
+        $bulk = $this->hub()->transactionLevel() === 0;
+
+        if ($bulk) {
+            foreach (array_keys(self::IDENTITY_KEY_INDEXES) as $name) {
+                if ($this->indexExists('gp_identity', $name)) {
+                    $this->hub()->statement("ALTER TABLE gp_identity DROP INDEX `$name`");
+                }
+            }
+        }
+
+        try {
+            $fn();
+        } finally {
+            if ($bulk) {
+                foreach (self::IDENTITY_KEY_INDEXES as $name => $cols) {
+                    if (! $this->indexExists('gp_identity', $name)) {
+                        $this->hub()->statement("ALTER TABLE gp_identity ADD INDEX `$name` ($cols)");
+                    }
+                }
+            }
+        }
+    }
 
     private function dropIdentityKeyIndexes(): void
     {

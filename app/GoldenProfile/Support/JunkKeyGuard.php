@@ -97,13 +97,25 @@ class JunkKeyGuard
         $hub = $this->hub();
         $cap = $this->maxIdentitiesPerValue($column);
 
-        $hub->statement('CREATE TABLE IF NOT EXISTS gp_junk_value_blocklist (
-            column_name VARCHAR(64) NOT NULL,
-            value VARCHAR(255) NOT NULL,
-            reason VARCHAR(32) NOT NULL,
-            distinct_people INT NOT NULL DEFAULT 0,
-            PRIMARY KEY (column_name, value)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+        // Checked rather than CREATE TABLE IF NOT EXISTS: the IF NOT EXISTS form
+        // causes an implicit COMMIT in MySQL whether or not it creates anything,
+        // and this sits on resolveDeterministic()'s path, so it would commit a
+        // caller's open transaction. Same fix as SsnHashGuard's, same reason.
+        $exists = $hub->selectOne(
+            'SELECT 1 FROM information_schema.tables
+             WHERE table_schema = DATABASE() AND table_name = ? LIMIT 1',
+            ['gp_junk_value_blocklist'],
+        );
+
+        if (! $exists) {
+            $hub->statement('CREATE TABLE gp_junk_value_blocklist (
+                column_name VARCHAR(64) NOT NULL,
+                value VARCHAR(255) NOT NULL,
+                reason VARCHAR(32) NOT NULL,
+                distinct_people INT NOT NULL DEFAULT 0,
+                PRIMARY KEY (column_name, value)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+        }
 
         $hub->table('gp_junk_value_blocklist')->where('column_name', $column)->delete();
 

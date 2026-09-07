@@ -102,6 +102,15 @@ class SqlBackfill
      */
     public function indexStaging(?callable $log = null): void
     {
+        // ALTER TABLE implicitly COMMITs. Adding a staging index while a caller
+        // has a transaction open would commit it, so this is a no-op there — the
+        // indexes exist to turn the resolve tiers' GROUP BY / NOT EXISTS into
+        // index lookups over millions of rows, which a transactional caller does
+        // not have.
+        if ($this->hub()->transactionLevel() > 0) {
+            return;
+        }
+
         $indexes = [
             'stg_ssn' => 'ssn_hash',
             'stg_npi' => 'npi',
@@ -637,8 +646,18 @@ class SqlBackfill
         // the duration so the bulk insert doesn't maintain 5 secondary indexes
         // per row; the earlier key tiers already finished (they needed them),
         // and dedup (which needs them) runs after, so we rebuild before returning.
-        $this->dropIdentityKeyIndexes();
+        $this->withoutIdentityKeyIndexes(function () {
+            $this->residualBody();
+        });
+    }
 
+    /**
+     * The residual create-and-link statements, extracted so
+     * withoutIdentityKeyIndexes() can wrap them. Task 5 gives this its own
+     * scratch column instead of borrowing merged_into.
+     */
+    private function residualBody(): void
+    {
         // Anti-join (LEFT JOIN … link_id IS NULL) instead of a correlated NOT EXISTS.
         $this->hub()->statement(
             "INSERT INTO gp_identity
@@ -667,8 +686,6 @@ class SqlBackfill
 
         $this->hub()->statement('UPDATE gp_identity SET merged_into = NULL WHERE merged_into IS NOT NULL', []);
 
-        // Rebuild the key indexes for dedup + finalize.
-        $this->addIdentityKeyIndexes();
     }
 
     /** gp_identity key indexes, dropped during the residual bulk insert and rebuilt after. */
@@ -689,6 +706,56 @@ class SqlBackfill
         'idx_dea' => 'dea_number, `current`',
         'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob, `current`',
     ];
+
+    /**
+     * Run $fn with gp_identity's five key indexes dropped, then rebuilt.
+     *
+     * residualCreateAndLink()'s insert is the single biggest in the pipeline
+     * — one identity per still-unlinked staged row, potentially millions — and
+     * after 2026_09_04_000100_add_scd2_versioning
+     * appended `current` to all five, so the flip (UPDATE … SET current = 0)
+     * rewrites one entry in every one of them per superseded identity, and the
+     * insert that follows builds five entries per new version. The reason
+     * changed; the conclusion did not — 9c3f11c measured the un-dropped version
+     * of this pass at "~tens of min per field".
+     *
+     * uq_identity_current is deliberately NOT dropped. It is the only thing that
+     * turns "two current versions of one identity" from a silent duplicate row
+     * into a duplicate-key error, and the flip-then-insert ORDER exists because
+     * it is enforced. Dropping it for speed would remove the guarantee at exactly
+     * the moment this code starts depending on it.
+     *
+     * Skipped entirely while a transaction is open. ALTER TABLE causes an implicit
+     * COMMIT in MySQL, so dropping an index mid-transaction commits whatever the
+     * caller had open — for HubTestCase that is the fixture of the running test,
+     * which then leaks into every later test in the process without anything
+     * failing. Inside a transaction the data set is a handful of rows and the
+     * optimisation is worth nothing, so skipping loses nothing either.
+     */
+    private function withoutIdentityKeyIndexes(callable $fn): void
+    {
+        $bulk = $this->hub()->transactionLevel() === 0;
+
+        if ($bulk) {
+            foreach (array_keys(self::IDENTITY_KEY_INDEXES) as $name) {
+                if ($this->indexExists('gp_identity', $name)) {
+                    $this->hub()->statement("ALTER TABLE gp_identity DROP INDEX `$name`");
+                }
+            }
+        }
+
+        try {
+            $fn();
+        } finally {
+            if ($bulk) {
+                foreach (self::IDENTITY_KEY_INDEXES as $name => $cols) {
+                    if (! $this->indexExists('gp_identity', $name)) {
+                        $this->hub()->statement("ALTER TABLE gp_identity ADD INDEX `$name` ($cols)");
+                    }
+                }
+            }
+        }
+    }
 
     private function dropIdentityKeyIndexes(): void
     {
