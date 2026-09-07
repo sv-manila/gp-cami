@@ -61,7 +61,12 @@ class QuarantineGateTest extends HubTestCase
     {
         $connector = new StreamlineLocalConnector($this->systemId);
 
-        $stgId = $connector->ingest($this->emptyEmployee(['id' => 9002, 'last_name' => 'Okafor']));
+        // [] rather than null for the additional-info rows: phpunit.xml points
+        // SRC_DB_* at a dead socket by design, so the per-row path can only be
+        // driven past rebuildChildren()'s employee_additional_info fetch by
+        // supplying those rows. Empty is the right value here — neither of
+        // these fixtures carries a DEA or an MMIS number.
+        $stgId = $connector->ingest($this->emptyEmployee(['id' => 9002, 'last_name' => 'Okafor']), null, []);
 
         $this->assertNotNull($stgId);
         $this->assertSame(0, $this->hub()->table('gp_quarantine')->where('source_id', 9002)->count());
@@ -79,7 +84,7 @@ class QuarantineGateTest extends HubTestCase
 
         $stgId = $connector->ingest($this->emptyEmployee([
             'id' => 9003, 'certification_number' => 'L-9003', 'certification_state' => 'NY',
-        ]));
+        ]), null, []);
 
         $this->assertNotNull($stgId);
         $this->assertSame(0, $this->hub()->table('gp_quarantine')->where('source_id', 9003)->count());

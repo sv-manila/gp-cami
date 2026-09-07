@@ -110,4 +110,60 @@ class StreamlineLocalConnectorTest extends TestCase
 
         $this->assertSame([], $rows['aliases']);
     }
+
+    public function test_additional_rows_attaches_state_to_mmis_but_not_dea(): void
+    {
+        $rows = [
+            (object) ['name' => 'mmis_number', 'value' => 'MMIS-4471'],
+            (object) ['name' => 'dea_number', 'value' => 'AH1234563'],
+        ];
+
+        $extra = $this->connector()->additionalRows($rows, 'CA');
+
+        $byType = collect($extra['identifiers'])->keyBy('id_type');
+        $this->assertSame('CA', $byType['mmis']['state']);
+        // DEA registration is federal, so it is never state-scoped. The plan
+        // asserted the key was ABSENT from a DEA row; it must be present and
+        // null instead — see test_identifier_rows_all_share_one_key_set.
+        $this->assertNull($byType['dea']['state']);
+    }
+
+    public function test_additional_rows_with_no_state_leaves_mmis_state_null(): void
+    {
+        $rows = [(object) ['name' => 'mmis_number', 'value' => 'MMIS-4471']];
+
+        $extra = $this->connector()->additionalRows($rows);
+
+        $this->assertNull($extra['identifiers'][0]['state']);
+    }
+
+    /**
+     * Every identifier row must carry an identical key set, DEA and MMIS
+     * alike. Both staging paths insert these as ONE multi-row statement
+     * (rebuildChildren via insert(), SqlBackfill via bulkInsert), and
+     * Laravel builds the column list from the FIRST row only, then binds
+     * array_values() of every row against it. Measured: inserting
+     * ['a','b'] followed by ['a','b','c'] fails with
+     * "SQLSTATE[21S01] Column count doesn't match value count at row 2".
+     *
+     * So an employee carrying BOTH a DEA and an MMIS number would have
+     * crashed staging outright if DEA rows omitted the state key. This test
+     * is the regression pin for that.
+     */
+    public function test_identifier_rows_all_share_one_key_set(): void
+    {
+        $rows = [
+            (object) ['name' => 'dea_number', 'value' => 'AH1234563'],
+            (object) ['name' => 'alt_dea_number', 'value' => 'BX9876543'],
+            (object) ['name' => 'mmis_number', 'value' => 'MMIS-4471'],
+        ];
+
+        $identifiers = $this->connector()->additionalRows($rows, 'CA')['identifiers'];
+
+        $this->assertCount(3, $identifiers);
+        $keySets = array_map(fn ($r) => array_keys($r), $identifiers);
+        foreach ($keySets as $keys) {
+            $this->assertSame($keySets[0], $keys, 'identifier rows must be insert-compatible');
+        }
+    }
 }

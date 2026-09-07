@@ -91,7 +91,15 @@ class StreamlineLocalConnector
         ];
     }
 
-    public function ingest(object $emp, ?array $accountMap = null): ?int
+    /**
+     * $aiRows lets a caller supply this employee's employee_additional_info
+     * rows instead of paying for a per-row source query, exactly as
+     * $accountMap already does for the employeelists lookup. It also makes the
+     * per-row path testable: phpunit.xml points SRC_DB_* at a dead socket on
+     * purpose, so before this parameter existed no test could drive ingest()
+     * past the additional-info fetch at all.
+     */
+    public function ingest(object $emp, ?array $accountMap = null, ?iterable $aiRows = null): ?int
     {
         $row = $this->personRow($emp, $accountMap);
         $children = $this->childRows($emp);
@@ -121,28 +129,51 @@ class StreamlineLocalConnector
             $this->hub()->table('stg_person')->where($key)->update($row);
         }
 
-        $this->rebuildChildren($stgId, $emp, $isNew, $children);
+        $this->rebuildChildren($stgId, $emp, $isNew, $children, $aiRows);
 
         return $stgId;
     }
 
     /** Rebuild the flattened alias/address/license children for a staged person. */
-    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null): void
+    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null, ?iterable $aiRows = null): void
     {
         $hub = $this->hub();
         // A freshly inserted staged person has no children yet — skip the
-        // three (empty) deletes that dominate the fresh-load per-row cost.
+        // four (empty) deletes that dominate the fresh-load per-row cost.
         if (! $isNew) {
             $hub->table('stg_person_alias')->where('stg_person_id', $stgId)->delete();
             $hub->table('stg_person_address')->where('stg_person_id', $stgId)->delete();
             $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
+            $hub->table('stg_person_identifier')->where('stg_person_id', $stgId)->delete();
         }
 
         // ingest() has already computed these to run the quarantine gate;
         // reuse them rather than paying for childRows() a second time per row.
         $c = $children ?? $this->childRows($emp);
-        foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses', 'stg_person_license' => 'licenses'] as $table => $bucket) {
-            if ($c[$bucket]) {
+
+        // employee_additional_info (DEA/MMIS + extra licenses/aliases). The
+        // set-based backfill (SqlBackfill::stage()) has always fetched this per
+        // chunk; the per-row path never did, so DEA/MMIS identifiers were
+        // silently invisible to gp:sync and Engine::backfill() until this fix —
+        // which makes promoting them to a real-time resolver tier (Task 9)
+        // meaningless on that path without it.
+        //
+        // One extra source query per ingested row mirrors exactly what stage()
+        // already does per chunk, just unbatched. ingest() is not on a hot bulk
+        // path — that is stage()'s job — only on gp:sync's incremental,
+        // already-per-row loop, so this does not change its performance
+        // character.
+        $aiRows ??= $this->src()->table('employee_additional_info')
+            ->where('employee_id', $emp->id)->where('value', '<>', '')
+            ->get(['name', 'value']);
+        $extra = $this->additionalRows($aiRows, $emp->state ?? null);
+        $c['aliases'] = array_merge($c['aliases'], $extra['aliases']);
+        $c['licenses'] = array_merge($c['licenses'], $extra['licenses']);
+        $c['identifiers'] = $extra['identifiers'];
+
+        foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses',
+            'stg_person_license' => 'licenses', 'stg_person_identifier' => 'identifiers'] as $table => $bucket) {
+            if ($c[$bucket] ?? null) {
                 $hub->table($table)->insert(array_map(
                     fn ($r) => $r + ['stg_person_id' => $stgId], $c[$bucket]
                 ));
@@ -218,11 +249,16 @@ class StreamlineLocalConnector
      * into: multi-valued identifiers (DEA, MMIS — match keys), extra licenses
      * (CSL + alt cert/csl licenses), and business-name aliases.
      *
+     * $state is the employee's own state (personRow()'s already-cleaned
+     * value), attached to MMIS identifiers only — DEA registration is federal.
+     *
      * @param  iterable  $aiRows  rows with ->name / ->value (or [name][value])
+     * @param  string|null  $state  the employee's state, for state-scoped identifiers
      * @return array{identifiers:array,licenses:array,aliases:array}
      */
-    public function additionalRows(iterable $aiRows): array
+    public function additionalRows(iterable $aiRows, ?string $state = null): array
     {
+        $state = $this->clean($state);
         $v = [];
         foreach ($aiRows as $r) {
             $name = is_array($r) ? ($r['name'] ?? null) : ($r->name ?? null);
@@ -233,17 +269,27 @@ class StreamlineLocalConnector
             }
         }
 
+        // Every identifier row carries the SAME key set, state included, even
+        // where state is meaningless. Both staging paths insert these as one
+        // multi-row statement and Laravel takes the column list from the first
+        // row only, then binds array_values() of each subsequent row against
+        // it — so a DEA row missing the key and an MMIS row carrying it fails
+        // outright with "SQLSTATE[21S01] Column count doesn't match value
+        // count at row 2". Measured. An employee holding both a DEA and an
+        // MMIS number is not rare, so the shapes must not diverge.
         $identifiers = [];
-        // DEA (match key) — primary + alt + per-alt-license DEAs.
+        // DEA (match key, federal — never state-scoped, so state stays null).
         foreach (['dea_number', 'alt_dea_number', 'alt_license_dea_number_2', 'alt_license_dea_number_3',
             'alt_license_dea_number_4', 'alt_license_dea_number_5', 'alt_license_dea_number_6'] as $k) {
             if (! empty($v[$k])) {
-                $identifiers[] = ['id_type' => 'dea', 'id_value' => $v[$k]];
+                $identifiers[] = ['id_type' => 'dea', 'id_value' => $v[$k], 'state' => null];
             }
         }
-        // MMIS (match key).
+        // MMIS (match key, state-scoped — see this plan's Task 8 for why
+        // "(state, medicaid id)" and "(state, provider#)" both resolve to this
+        // one field in streamline_local).
         if (! empty($v['mmis_number'])) {
-            $identifiers[] = ['id_type' => 'mmis', 'id_value' => $v['mmis_number']];
+            $identifiers[] = ['id_type' => 'mmis', 'id_value' => $v['mmis_number'], 'state' => $state];
         }
 
         $licenses = [];

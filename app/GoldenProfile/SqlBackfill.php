@@ -239,7 +239,7 @@ class SqlBackfill
                 }
                 // Additional-info: identifiers (DEA/MMIS) + extra licenses + business aliases.
                 if (isset($aiByEmp[$emp->id])) {
-                    $extra = $this->connector->additionalRows($aiByEmp[$emp->id]);
+                    $extra = $this->connector->additionalRows($aiByEmp[$emp->id], $emp->state ?? null);
                     foreach ($extra['identifiers'] as $r) {
                         $identifiers[] = $r + ['stg_person_id' => $sid];
                     }
