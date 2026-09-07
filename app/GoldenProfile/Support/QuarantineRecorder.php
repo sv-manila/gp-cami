@@ -19,17 +19,31 @@ use Illuminate\Support\Facades\Log;
 class QuarantineRecorder
 {
     /**
+     * $identifiers is the row's multi-valued DEA/MMIS identifiers, and it is
+     * load-bearing rather than belt-and-braces. $personRow['dea_number'] is
+     * hardcoded null by StreamlineLocalConnector::personRow() ("not present in
+     * this source"), and config/golden_profile.php says the same of the
+     * dea_number tier, so for streamline_local that condition is dead code.
+     * The REAL DEA and MMIS values arrive through employee_additional_info and
+     * are pivoted by additionalRows(). Without them here, a row whose only
+     * identifying data is a DEA or MMIS number would be quarantined and its
+     * identifier never staged — precisely the row plan 5 promotes those two
+     * into match keys for. $licenses must likewise include the additional-info
+     * licences, not just childRows()'s.
+     *
      * @param  array<string,mixed>  $personRow  the array personRow()/stage() would insert
-     * @param  list<array<string,mixed>>  $licenses  that row's license child rows
+     * @param  list<array<string,mixed>>  $licenses  every licence child row, additional-info included
+     * @param  list<array<string,mixed>>  $identifiers  every DEA/MMIS identifier child row
      */
-    public function evaluate(array $personRow, array $licenses): ?string
+    public function evaluate(array $personRow, array $licenses, array $identifiers = []): ?string
     {
         $hasIdentifyingData = ! empty($personRow['last_name'])
             || ! empty($personRow['first_name'])
             || ! empty($personRow['npi'])
             || ! empty($personRow['ssn_hash'])
             || ! empty($personRow['dea_number'])
-            || $licenses !== [];
+            || $licenses !== []
+            || $identifiers !== [];
 
         return $hasIdentifyingData ? null : 'no_identifying_data';
     }

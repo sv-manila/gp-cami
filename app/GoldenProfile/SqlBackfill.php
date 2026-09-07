@@ -180,13 +180,30 @@ class SqlBackfill
             // $childCache for the children loop below: the quarantine gate
             // needs each row's licences, and recomputing them a second time
             // would double that work across every staged row.
+            // Fetched BEFORE the quarantine gate below, not after the stg_person
+            // insert: the gate has to see each row's DEA/MMIS identifiers and
+            // additional-info licences to judge whether it carries anything
+            // resolvable. It depends only on $rows, so moving it up is safe.
+            $aiByEmp = $this->src()->table('employee_additional_info')
+                ->whereIn('employee_id', $rows->pluck('id')->all())
+                ->where('value', '<>', '')
+                ->get(['employee_id', 'name', 'value'])
+                ->groupBy('employee_id');
+
             $persons = [];
             $quarantined = [];
             $childCache = [];
+            $extraCache = [];
             foreach ($rows as $emp) {
                 $row = $this->connector->personRow($emp, $accountMap);
                 $childCache[$emp->id] = $this->connector->childRows($emp);
-                if ($this->shouldQuarantine($row, $childCache[$emp->id]['licenses'])) {
+                $extraCache[$emp->id] = $this->connector->additionalRows(
+                    $aiByEmp[$emp->id] ?? [], $emp->state ?? null
+                );
+                $licenses = array_merge(
+                    $childCache[$emp->id]['licenses'], $extraCache[$emp->id]['licenses']
+                );
+                if ($this->shouldQuarantine($row, $licenses, $extraCache[$emp->id]['identifiers'])) {
                     $quarantined[$emp->id] = true;
                     $this->quarantine->record($this->systemId, self::SOURCE_TABLE, (int) $emp->id, 'no_identifying_data');
 
@@ -205,13 +222,6 @@ class SqlBackfill
                 ->where('system_id', $this->systemId)->where('source_table', self::SOURCE_TABLE)
                 ->whereIn('source_id', $rows->pluck('id')->all())
                 ->pluck('stg_person_id', 'source_id')->all();
-
-            // employee_additional_info (EAV) for this chunk, grouped by employee.
-            $aiByEmp = $this->src()->table('employee_additional_info')
-                ->whereIn('employee_id', $rows->pluck('id')->all())
-                ->where('value', '<>', '')
-                ->get(['employee_id', 'name', 'value'])
-                ->groupBy('employee_id');
 
             $aliases = $addresses = $licenses = $identifiers = [];
             foreach ($rows as $emp) {
@@ -237,18 +247,18 @@ class SqlBackfill
                 foreach ($c['licenses'] as $l) {
                     $licenses[] = $l + ['stg_person_id' => $sid];
                 }
-                // Additional-info: identifiers (DEA/MMIS) + extra licenses + business aliases.
-                if (isset($aiByEmp[$emp->id])) {
-                    $extra = $this->connector->additionalRows($aiByEmp[$emp->id], $emp->state ?? null);
-                    foreach ($extra['identifiers'] as $r) {
-                        $identifiers[] = $r + ['stg_person_id' => $sid];
-                    }
-                    foreach ($extra['licenses'] as $l) {
-                        $licenses[] = $l + ['stg_person_id' => $sid];
-                    }
-                    foreach ($extra['aliases'] as $a) {
-                        $aliases[] = $a + ['stg_person_id' => $sid];
-                    }
+                // Additional-info: identifiers (DEA/MMIS) + extra licenses +
+                // business aliases. Already pivoted above for the quarantine
+                // gate — reused rather than recomputed.
+                $extra = $extraCache[$emp->id] ?? ['identifiers' => [], 'licenses' => [], 'aliases' => []];
+                foreach ($extra['identifiers'] as $r) {
+                    $identifiers[] = $r + ['stg_person_id' => $sid];
+                }
+                foreach ($extra['licenses'] as $l) {
+                    $licenses[] = $l + ['stg_person_id' => $sid];
+                }
+                foreach ($extra['aliases'] as $a) {
+                    $aliases[] = $a + ['stg_person_id' => $sid];
                 }
             }
             // #6: one transaction per chunk for the child writes — a single
@@ -422,9 +432,9 @@ class SqlBackfill
      * this delegates rather than duplicating the five-condition check —
      * QuarantineRecorder::evaluate() stays the single source of truth.
      */
-    private function shouldQuarantine(array $personRow, array $licenses): bool
+    private function shouldQuarantine(array $personRow, array $licenses, array $identifiers = []): bool
     {
-        return $this->quarantine->evaluate($personRow, $licenses) !== null;
+        return $this->quarantine->evaluate($personRow, $licenses, $identifiers) !== null;
     }
 
     /** Populate gp_license + gp_address from the staged children (set-based). */

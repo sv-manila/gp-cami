@@ -104,12 +104,23 @@ class StreamlineLocalConnector
         $row = $this->personRow($emp, $accountMap);
         $children = $this->childRows($emp);
 
-        // A row with no name, no valid npi, no ssn hash, no dea and no licence
-        // — all judged AFTER junk-cleaning — carries nothing any resolver can
-        // act on. Staging it mints a meaningless residual identity that lives
-        // forever, so it goes to gp_quarantine instead. Returns null: callers
-        // must not resolve a row that was never staged.
-        $reason = (new QuarantineRecorder)->evaluate($row, $children['licenses']);
+        // Pivoted BEFORE the quarantine gate, not inside rebuildChildren()
+        // afterwards. The gate has to see this employee's DEA/MMIS identifiers
+        // and additional-info licences to judge whether the row carries
+        // anything resolvable — those are the row's only identifying data in
+        // exactly the case plan 5 promotes DEA and MMIS into match keys for.
+        $extra = $this->additionalRows($aiRows ?? $this->additionalInfoRows($emp), $emp->state ?? null);
+
+        // A row with no name, no valid npi, no ssn hash, no dea/mmis and no
+        // licence — all judged AFTER junk-cleaning — carries nothing any
+        // resolver can act on. Staging it mints a meaningless residual identity
+        // that lives forever, so it goes to gp_quarantine instead. Returns
+        // null: callers must not resolve a row that was never staged.
+        $reason = (new QuarantineRecorder)->evaluate(
+            $row,
+            array_merge($children['licenses'], $extra['licenses']),
+            $extra['identifiers'],
+        );
         if ($reason !== null) {
             (new QuarantineRecorder)->record($this->systemId, self::SOURCE_TABLE, (int) $emp->id, $reason);
 
@@ -129,13 +140,13 @@ class StreamlineLocalConnector
             $this->hub()->table('stg_person')->where($key)->update($row);
         }
 
-        $this->rebuildChildren($stgId, $emp, $isNew, $children, $aiRows);
+        $this->rebuildChildren($stgId, $emp, $isNew, $children, $extra);
 
         return $stgId;
     }
 
     /** Rebuild the flattened alias/address/license children for a staged person. */
-    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null, ?iterable $aiRows = null): void
+    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null, ?array $extra = null): void
     {
         $hub = $this->hub();
         // A freshly inserted staged person has no children yet — skip the
@@ -158,15 +169,9 @@ class StreamlineLocalConnector
         // which makes promoting them to a real-time resolver tier (Task 9)
         // meaningless on that path without it.
         //
-        // One extra source query per ingested row mirrors exactly what stage()
-        // already does per chunk, just unbatched. ingest() is not on a hot bulk
-        // path — that is stage()'s job — only on gp:sync's incremental,
-        // already-per-row loop, so this does not change its performance
-        // character.
-        $aiRows ??= $this->src()->table('employee_additional_info')
-            ->where('employee_id', $emp->id)->where('value', '<>', '')
-            ->get(['name', 'value']);
-        $extra = $this->additionalRows($aiRows, $emp->state ?? null);
+        // ingest() already pivoted these to run the quarantine gate and passes
+        // them in; the fallback is here only for a direct caller.
+        $extra ??= $this->additionalRows($this->additionalInfoRows($emp), $emp->state ?? null);
         $c['aliases'] = array_merge($c['aliases'], $extra['aliases']);
         $c['licenses'] = array_merge($c['licenses'], $extra['licenses']);
         $c['identifiers'] = $extra['identifiers'];
@@ -334,6 +339,20 @@ class StreamlineLocalConnector
         $year = $dob ? substr((string) $dob, 0, 4) : '____';
 
         return soundex($last).'|'.$year;
+    }
+
+    /**
+     * This employee's employee_additional_info rows. One source query per
+     * ingested row, mirroring what SqlBackfill::stage() already does per chunk,
+     * just unbatched — ingest() is not on a hot bulk path (that is stage()'s
+     * job), only on gp:sync's incremental, already-per-row loop, so this does
+     * not change its performance character.
+     */
+    private function additionalInfoRows(object $emp): iterable
+    {
+        return $this->src()->table('employee_additional_info')
+            ->where('employee_id', $emp->id)->where('value', '<>', '')
+            ->get(['name', 'value']);
     }
 
     private function clean(?string $v): ?string
