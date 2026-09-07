@@ -653,8 +653,21 @@ class SqlBackfill
 
     /**
      * The residual create-and-link statements, extracted so
-     * withoutIdentityKeyIndexes() can wrap them. Task 5 gives this its own
-     * scratch column instead of borrowing merged_into.
+     * withoutIdentityKeyIndexes() can wrap them.
+     *
+     * The 1:1 create-then-link stays fully set-based by carrying stg_person_id out
+     * of the identity INSERT in gp_identity.stg_seed_id
+     * (2026_09_04_000200_add_stg_seed_id_to_gp_identity) and joining back on it.
+     * That used to be merged_into; 2026_09_04_000100_add_scd2_versioning made
+     * merged_into a golden attribute, so borrowing it would write a stg_person_id
+     * into a golden field and mint two versions per identity doing it — see the
+     * migration's docblock.
+     *
+     * version_no and current are stated explicitly even though the column defaults
+     * would produce them. The per-row counterpart
+     * (DeterministicResolver::createIdentity) does the same, for the same reason: a
+     * reader of this statement should not have to open the migration to know which
+     * version it produces.
      */
     private function residualBody(): void
     {
@@ -662,9 +675,11 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status, merged_into, first_seen, last_updated)
+                 ssn_hash, npi, upin, dea_number, confidence, record_count, status, stg_seed_id,
+                 version_no, `current`, first_seen, last_updated)
              SELECT UUID(), s.first_name, s.middle_name, s.last_name, s.date_of_birth,
-                 s.ssn_hash, s.npi, s.upin, s.dea_number, 1.0, 0, 'active', s.stg_person_id, NOW(), NOW()
+                 s.ssn_hash, s.npi, s.upin, s.dea_number, 1.0, 0, 'active', s.stg_person_id,
+                 1, 1, NOW(), NOW()
              FROM stg_person s
              LEFT JOIN gp_source_link l
                ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
@@ -672,6 +687,9 @@ class SqlBackfill
             [$this->systemId]
         );
 
+        // i.current = 1 is redundant on rows this method just minted, and kept
+        // anyway: a re-run after a partial failure would otherwise be able to join
+        // a superseded version that still carried a stale seed.
         $this->hub()->statement(
             "INSERT INTO gp_source_link
                 (identity_id, system_id, source_table, source_id, account_id, employeelist_id,
@@ -679,13 +697,19 @@ class SqlBackfill
              SELECT i.identity_id, s.system_id, s.source_table, s.source_id, s.account_id, s.employeelist_id,
                  'deterministic', 'new', 1.0, 'auto_match', 0, NOW()
              FROM gp_identity i
-             JOIN stg_person s ON s.stg_person_id = i.merged_into
-             WHERE i.merged_into IS NOT NULL",
+             JOIN stg_person s ON s.stg_person_id = i.stg_seed_id
+             WHERE i.stg_seed_id IS NOT NULL AND i.`current` = 1",
             []
         );
 
-        $this->hub()->statement('UPDATE gp_identity SET merged_into = NULL WHERE merged_into IS NOT NULL', []);
-
+        // A plain UPDATE, not a versioned write, and that is correct: stg_seed_id is
+        // absent from Versioner::TABLES, so it is not a golden fact and changing it
+        // is not a change to the identity. That is the whole point of giving it its
+        // own column.
+        $this->hub()->statement(
+            'UPDATE gp_identity SET stg_seed_id = NULL WHERE stg_seed_id IS NOT NULL',
+            []
+        );
     }
 
     /** gp_identity key indexes, dropped during the residual bulk insert and rebuilt after. */
