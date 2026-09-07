@@ -2,6 +2,7 @@
 
 namespace App\GoldenProfile\Connectors;
 
+use App\GoldenProfile\Support\NpiValidator;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -51,7 +52,17 @@ class StreamlineLocalConnector
                     ->where('id', $emp->employeelist_id)->value('account_id');
         }
 
+        // Format-valid means "10 digits with a correct NPPES check digit" — see
+        // NpiValidator. A value that fails this is nulled here, not just skipped
+        // by a caller, so every downstream consumer (both resolvers, both
+        // ingestion paths, since they all share this one method) sees the same
+        // fact: stg_person.npi is either a validated NPI or nothing. Rejecting a
+        // value that a PRIOR load accepted can split an identity that currently
+        // merges on it — see gp:npi-audit for measuring that against a real hub,
+        // since the eval fixture cannot exercise this (Task 2's fix confirmed
+        // neither corrected NPI is shared between records).
         $npi = (int) ($emp->npi ?? 0);
+        $npiValid = $npi > 0 && NpiValidator::isValid((string) $npi);
 
         return [
             'system_id' => $this->systemId,
@@ -65,7 +76,7 @@ class StreamlineLocalConnector
             'date_of_birth' => $this->date($emp->date_of_birth),
             'ssn_hash' => $emp->ssn_hash ?: null,          // ingest as-is (global key)
             'ssn_last_four' => $emp->ssn_last_four ?: null,
-            'npi' => $npi > 0 ? $npi : null,
+            'npi' => $npiValid ? $npi : null,
             'upin' => $emp->upin ?: null,
             'dea_number' => null,                          // not present in this source
             'address1' => $this->clean($emp->address1),
