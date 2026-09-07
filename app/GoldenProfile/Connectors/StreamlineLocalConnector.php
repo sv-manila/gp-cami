@@ -3,6 +3,7 @@
 namespace App\GoldenProfile\Connectors;
 
 use App\GoldenProfile\Support\NpiValidator;
+use App\GoldenProfile\Support\QuarantineRecorder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -90,9 +91,22 @@ class StreamlineLocalConnector
         ];
     }
 
-    public function ingest(object $emp, ?array $accountMap = null): int
+    public function ingest(object $emp, ?array $accountMap = null): ?int
     {
         $row = $this->personRow($emp, $accountMap);
+        $children = $this->childRows($emp);
+
+        // A row with no name, no valid npi, no ssn hash, no dea and no licence
+        // — all judged AFTER junk-cleaning — carries nothing any resolver can
+        // act on. Staging it mints a meaningless residual identity that lives
+        // forever, so it goes to gp_quarantine instead. Returns null: callers
+        // must not resolve a row that was never staged.
+        $reason = (new QuarantineRecorder)->evaluate($row, $children['licenses']);
+        if ($reason !== null) {
+            (new QuarantineRecorder)->record($this->systemId, self::SOURCE_TABLE, (int) $emp->id, $reason);
+
+            return null;
+        }
 
         // Select-first instead of updateOrInsert: on a fresh load the common
         // path is a brand-new row, and knowing it's new lets us skip the three
@@ -107,13 +121,13 @@ class StreamlineLocalConnector
             $this->hub()->table('stg_person')->where($key)->update($row);
         }
 
-        $this->rebuildChildren($stgId, $emp, $isNew);
+        $this->rebuildChildren($stgId, $emp, $isNew, $children);
 
         return $stgId;
     }
 
     /** Rebuild the flattened alias/address/license children for a staged person. */
-    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false): void
+    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null): void
     {
         $hub = $this->hub();
         // A freshly inserted staged person has no children yet — skip the
@@ -124,7 +138,9 @@ class StreamlineLocalConnector
             $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
         }
 
-        $c = $this->childRows($emp);
+        // ingest() has already computed these to run the quarantine gate;
+        // reuse them rather than paying for childRows() a second time per row.
+        $c = $children ?? $this->childRows($emp);
         foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses', 'stg_person_license' => 'licenses'] as $table => $bucket) {
             if ($c[$bucket]) {
                 $hub->table($table)->insert(array_map(

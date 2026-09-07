@@ -141,8 +141,17 @@ class Engine
             $empIds = [];
             foreach ($rows as $emp) {
                 $stgId = $this->connector->ingest($emp, $accountMap);
-                $identityIds[$this->resolver->resolve($stgId)] = true;
-                $empIds[] = $emp->id;
+                // ingest() returns null when the row was quarantined and never
+                // staged, so there is no stg_person_id to resolve and no
+                // credential/exclusion rollup to do for it. It HAS still been
+                // processed, so the watermark and $count below stay OUTSIDE this
+                // branch: skipping the watermark would let a quarantined row
+                // that happens to be the newest-modified in the source stall
+                // the sync watermark and re-read from there on every run.
+                if ($stgId !== null) {
+                    $identityIds[$this->resolver->resolve($stgId)] = true;
+                    $empIds[] = $emp->id;
+                }
                 if ($emp->date_modified && $emp->date_modified > $maxModified) {
                     $maxModified = $emp->date_modified;
                 }
@@ -534,8 +543,17 @@ class Engine
             $empIds = [];
             foreach ($rows as $emp) {
                 $stgId = $this->connector->ingest($emp, $accountMap);
-                $identityIds[$this->resolver->resolve($stgId)] = true;
-                $empIds[] = $emp->id;
+                // ingest() returns null when the row was quarantined and never
+                // staged, so there is no stg_person_id to resolve and no
+                // credential/exclusion rollup to do for it. It HAS still been
+                // processed, so the watermark and $count below stay OUTSIDE this
+                // branch: skipping the watermark would let a quarantined row
+                // that happens to be the newest-modified in the source stall
+                // the sync watermark and re-read from there on every run.
+                if ($stgId !== null) {
+                    $identityIds[$this->resolver->resolve($stgId)] = true;
+                    $empIds[] = $emp->id;
+                }
                 if ($emp->date_modified && $emp->date_modified > $maxModified) {
                     $maxModified = $emp->date_modified;
                 }

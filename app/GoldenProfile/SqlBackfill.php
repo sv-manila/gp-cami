@@ -4,6 +4,7 @@ namespace App\GoldenProfile;
 
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Support\JunkKeyGuard;
+use App\GoldenProfile\Support\QuarantineRecorder;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -37,6 +38,8 @@ class SqlBackfill
 
     private JunkKeyGuard $junkGuard;
 
+    private QuarantineRecorder $quarantine;
+
     /** Single-column deterministic key tiers, in confidence order. */
     private const KEY_TIERS = ['ssn_hash', 'npi', 'upin', 'dea_number'];
 
@@ -49,6 +52,7 @@ class SqlBackfill
         $this->connector = new StreamlineLocalConnector($this->systemId);
         $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
+        $this->quarantine = new QuarantineRecorder;
     }
 
     private function hub()
@@ -171,9 +175,24 @@ class SqlBackfill
             $accountMap = $this->accountMapFor($rows);
 
             // stg_person (bulk). insertOrIgnore keeps it idempotent on re-run.
+            //
+            // childRows() is computed once per row here and carried in
+            // $childCache for the children loop below: the quarantine gate
+            // needs each row's licences, and recomputing them a second time
+            // would double that work across every staged row.
             $persons = [];
+            $quarantined = [];
+            $childCache = [];
             foreach ($rows as $emp) {
-                $persons[] = $this->connector->personRow($emp, $accountMap);
+                $row = $this->connector->personRow($emp, $accountMap);
+                $childCache[$emp->id] = $this->connector->childRows($emp);
+                if ($this->shouldQuarantine($row, $childCache[$emp->id]['licenses'])) {
+                    $quarantined[$emp->id] = true;
+                    $this->quarantine->record($this->systemId, self::SOURCE_TABLE, (int) $emp->id, 'no_identifying_data');
+
+                    continue;
+                }
+                $persons[] = $row;
             }
             // Retry on deadlock: 16 workers doing concurrent INSERT IGNOREs take
             // insert-intention gap locks on stg_person's unique/PK indexes and
@@ -196,11 +215,19 @@ class SqlBackfill
 
             $aliases = $addresses = $licenses = $identifiers = [];
             foreach ($rows as $emp) {
+                // Belt and braces. A quarantined row is absent from $persons, so
+                // $ids has no entry for it on a first pass — but stage() is
+                // idempotent and re-runs over rows an EARLIER pass staged before
+                // this gate existed, where $ids WOULD resolve and the children
+                // would be re-staged for a row now judged unusable.
+                if (isset($quarantined[$emp->id])) {
+                    continue;
+                }
                 $sid = $ids[$emp->id] ?? null;
                 if (! $sid) {
                     continue;
                 }
-                $c = $this->connector->childRows($emp);
+                $c = $childCache[$emp->id] ?? $this->connector->childRows($emp);
                 foreach ($c['aliases'] as $a) {
                     $aliases[] = $a + ['stg_person_id' => $sid];
                 }
@@ -387,6 +414,17 @@ class SqlBackfill
         // mergeByLicense — it needs gp_license populated, which enrich() does.
         // Doing it as a resolve tier would chicken-and-egg (a fresh license
         // identity has no linked row to match against yet).
+    }
+
+    /**
+     * Same rule QuarantineRecorder::evaluate() applies per-row. stage() already
+     * holds its rows as plain arrays at exactly the point this needs to run, so
+     * this delegates rather than duplicating the five-condition check —
+     * QuarantineRecorder::evaluate() stays the single source of truth.
+     */
+    private function shouldQuarantine(array $personRow, array $licenses): bool
+    {
+        return $this->quarantine->evaluate($personRow, $licenses) !== null;
     }
 
     /** Populate gp_license + gp_address from the staged children (set-based). */
