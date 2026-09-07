@@ -6,6 +6,7 @@ use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\QuarantineRecorder;
 use App\GoldenProfile\Support\SetBasedPathGuard;
+use App\GoldenProfile\Support\SetVersionWriter;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -504,25 +505,79 @@ class SqlBackfill
     }
 
     /** Populate each active identity's null keys from its linked staged rows. */
+    /**
+     * Populate each active identity's null keys from its linked staged rows.
+     *
+     * This used to be one UPDATE … JOIN with SET col = COALESCE(i.col, k.col).
+     * Supplying a key an identity did not have is a change to a golden fact, so
+     * under the SCD-2 rule it is a NEW VERSION (Data Flow by CAMI: "insert a new
+     * row with current = 1, and set all preexisting rows to current = 0"), and
+     * supplying nothing must be no version at all. The per-row counterpart,
+     * DeterministicResolver::backfillKeys(), makes exactly that decision through
+     * Versioner::write(); this makes it for the whole set through
+     * SetVersionWriter::writeIdentities().
+     *
+     * The proposals table holds NULL for "nothing to add", which is
+     * VersionerSql::differsOnPresent()'s absent-column semantics and matches
+     * backfillKeys() skipping a column it has nothing for. The IF(i.col IS NULL, …)
+     * wrapper is what produces that NULL: a column the identity already has
+     * proposes nothing, so it can never be a change and can never be overwritten.
+     *
+     * TWO DIVERGENCES FROM THE PER-ROW PATH ARE PRE-EXISTING AND LEFT ALONE, because
+     * closing either would change which records match and this plan asserts the eval
+     * gate does not move (see docs/SCD2.md):
+     *
+     *   - backfillKeys() tests emptiness with PHP empty(), so '' and '0' count as
+     *     missing; IF(… IS NULL) only treats NULL as missing.
+     *   - backfillKeys() uses the value from the row being resolved; this uses
+     *     MAX() across every linked row.
+     *
+     * A THIRD is owned by plan 2: backfillKeys() refuses to promote a filler
+     * ssn_hash onto an identity that lacks one, and this has no blocklist screen at
+     * all. Adding it is a matching change, and plan 2 deletes ssn_hash from both
+     * paths, so it is recorded rather than fixed.
+     *
+     * WHY THIS STILL RUNS BETWEEN EVERY TIER. Its call site explains it: "after each
+     * tier we backfill identity keys from the just-linked rows so a later tier sees
+     * an earlier identity's secondary keys — without this, set-based tiers mint
+     * duplicate identities." Versioning it means each of those calls can mint a
+     * version, but only for identities that genuinely gained a key on that pass, and
+     * a key can only be gained once. The worst case is one version per identity per
+     * key it was missing — bounded by the number of key columns, not by the number
+     * of source rows.
+     */
     private function backfillIdentityKeys(): void
     {
-        $this->hub()->statement(
-            "UPDATE gp_identity i
-             JOIN (
-                 SELECT l.identity_id,
-                        MAX(s.ssn_hash) ssn_hash, MAX(s.npi) npi, MAX(s.upin) upin, MAX(s.dea_number) dea_number,
-                        MAX(s.date_of_birth) dob, MAX(s.first_name) fn, MAX(s.last_name) ln, MAX(s.middle_name) mn
-                 FROM gp_source_link l
-                 JOIN stg_person s ON s.system_id=l.system_id AND s.source_table=l.source_table AND s.source_id=l.source_id
-                 GROUP BY l.identity_id
-             ) k ON k.identity_id = i.identity_id
-             SET i.ssn_hash=COALESCE(i.ssn_hash,k.ssn_hash), i.npi=COALESCE(i.npi,k.npi),
-                 i.upin=COALESCE(i.upin,k.upin), i.dea_number=COALESCE(i.dea_number,k.dea_number),
-                 i.canonical_dob=COALESCE(i.canonical_dob,k.dob), i.canonical_first=COALESCE(i.canonical_first,k.fn),
-                 i.canonical_last=COALESCE(i.canonical_last,k.ln), i.canonical_middle=COALESCE(i.canonical_middle,k.mn)
-             WHERE i.status='active'",
-            []
-        );
+        $hub = $this->hub();
+
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_backfill_keys');
+        $hub->statement('CREATE TEMPORARY TABLE tmp_backfill_keys (INDEX idx_id (identity_id)) ENGINE=InnoDB AS
+            SELECT i.identity_id,
+                   IF(i.ssn_hash        IS NULL, k.ssn_hash,   NULL) AS ssn_hash,
+                   IF(i.npi             IS NULL, k.npi,        NULL) AS npi,
+                   IF(i.upin            IS NULL, k.upin,       NULL) AS upin,
+                   IF(i.dea_number      IS NULL, k.dea_number, NULL) AS dea_number,
+                   IF(i.canonical_dob   IS NULL, k.dob,        NULL) AS canonical_dob,
+                   IF(i.canonical_first IS NULL, k.fn,         NULL) AS canonical_first,
+                   IF(i.canonical_last  IS NULL, k.ln,         NULL) AS canonical_last,
+                   IF(i.canonical_middle IS NULL, k.mn,        NULL) AS canonical_middle
+            FROM gp_identity i
+            JOIN (
+                SELECT l.identity_id,
+                       MAX(s.ssn_hash) ssn_hash, MAX(s.npi) npi, MAX(s.upin) upin, MAX(s.dea_number) dea_number,
+                       MAX(s.date_of_birth) dob, MAX(s.first_name) fn, MAX(s.last_name) ln, MAX(s.middle_name) mn
+                FROM gp_source_link l
+                JOIN stg_person s ON s.system_id=l.system_id AND s.source_table=l.source_table AND s.source_id=l.source_id
+                GROUP BY l.identity_id
+            ) k ON k.identity_id = i.identity_id
+            WHERE i.status = \'active\' AND i.`current` = 1');
+
+        (new SetVersionWriter)->writeIdentities('tmp_backfill_keys', [
+            'ssn_hash', 'npi', 'upin', 'dea_number',
+            'canonical_dob', 'canonical_first', 'canonical_last', 'canonical_middle',
+        ]);
+
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_backfill_keys');
     }
 
     /** Create one identity per distinct new value of $col among unlinked rows. */
@@ -540,16 +595,20 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status, first_seen, last_updated)
+                 ssn_hash, npi, upin, dea_number, confidence, record_count, status,
+                 version_no, `current`, first_seen, last_updated)
              SELECT UUID(), r.first_name, r.middle_name, r.last_name, r.date_of_birth,
-                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active', NOW(), NOW()
+                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
+                 1, 1, NOW(), NOW()
              FROM stg_person r
              JOIN (
                  SELECT MIN(s.stg_person_id) mid
                  FROM stg_person s
                  LEFT JOIN gp_source_link l
                    ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
-                 LEFT JOIN (SELECT `$col` k FROM gp_identity WHERE status='active' AND `$col` IS NOT NULL GROUP BY `$col`) gi
+                 LEFT JOIN (SELECT `$col` k FROM gp_identity
+                            WHERE status='active' AND `current` = 1 AND `$col` IS NOT NULL
+                            GROUP BY `$col`) gi
                    ON gi.k = s.`$col`
                  WHERE s.system_id = ? AND s.`$col` IS NOT NULL
                    AND l.link_id IS NULL     -- not yet linked (anti-join)
@@ -579,7 +638,8 @@ class SqlBackfill
                  'deterministic', ?, 0.99, 'auto_match', 0, NOW()
              FROM stg_person s
              JOIN (SELECT `$col` k, MIN(identity_id) identity_id FROM gp_identity
-                   WHERE status='active' AND `$col` IS NOT NULL GROUP BY `$col`) i ON i.k = s.`$col`
+                   WHERE status='active' AND `current` = 1 AND `$col` IS NOT NULL
+                   GROUP BY `$col`) i ON i.k = s.`$col`
              WHERE s.system_id = ? AND s.`$col` IS NOT NULL
                $guard
                AND NOT EXISTS (SELECT 1 FROM gp_source_link l
@@ -594,9 +654,11 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status, first_seen, last_updated)
+                 ssn_hash, npi, upin, dea_number, confidence, record_count, status,
+                 version_no, `current`, first_seen, last_updated)
              SELECT UUID(), r.first_name, r.middle_name, r.last_name, r.date_of_birth,
-                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active', NOW(), NOW()
+                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
+                 1, 1, NOW(), NOW()
              FROM stg_person r
              JOIN (
                  SELECT MIN(s.stg_person_id) mid
@@ -604,7 +666,7 @@ class SqlBackfill
                  LEFT JOIN gp_source_link l
                    ON l.system_id=s.system_id AND l.source_table=s.source_table AND l.source_id=s.source_id
                  LEFT JOIN (SELECT canonical_last l, canonical_first f, canonical_dob d
-                            FROM gp_identity WHERE status='active'
+                            FROM gp_identity WHERE status='active' AND `current` = 1
                               AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
                             GROUP BY canonical_last, canonical_first, canonical_dob) gi
                    ON gi.l=s.last_name AND gi.f=s.first_name AND gi.d=s.date_of_birth
@@ -624,7 +686,7 @@ class SqlBackfill
                  'deterministic', 'name_dob', 0.95, 'auto_match', 0, NOW()
              FROM stg_person s
              JOIN (SELECT canonical_last l, canonical_first f, canonical_dob d, MIN(identity_id) identity_id
-                   FROM gp_identity WHERE status='active' AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
+                   FROM gp_identity WHERE status='active' AND `current` = 1 AND canonical_last IS NOT NULL AND canonical_first IS NOT NULL AND canonical_dob IS NOT NULL
                    GROUP BY canonical_last, canonical_first, canonical_dob) i
                   ON i.l=s.last_name AND i.f=s.first_name AND i.d=s.date_of_birth
              WHERE s.system_id = ?
