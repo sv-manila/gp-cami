@@ -4,6 +4,7 @@ namespace App\GoldenProfile\Resolution;
 
 use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\SsnHashGuard;
+use App\GoldenProfile\Support\Versioner;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -20,6 +21,8 @@ class DeterministicResolver
 
     private JunkKeyGuard $junkGuard;
 
+    private Versioner $versioner;
+
     /** Bind confidence per key, from config instead of literals. */
     private array $keyConfidence;
 
@@ -28,6 +31,7 @@ class DeterministicResolver
         $this->probabilistic = new ProbabilisticResolver($systemId);
         $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
+        $this->versioner = new Versioner;
         $this->keyConfidence = config('golden_profile.deterministic_keys', []);
     }
 
@@ -132,11 +136,26 @@ class DeterministicResolver
         // share a key before dedup runs. The set-based backfill already pins
         // MIN(identity_id); this makes the per-row path agree with it.
         //
+        // Every tier ALSO filters current = 1, in addition to status = 'active'.
+        // Both are needed and they mean different things: `current` picks the
+        // newest VERSION of an identity, `status` says whether that identity is
+        // live. A superseded version can still carry a key its successor dropped,
+        // so a tier that skipped the current filter would bind an incoming row to
+        // a version that no longer exists — a false merge, silently, since no
+        // error is raised. The five key indexes end in `current` for exactly these
+        // probes (2026_09_04_000100_add_scd2_versioning); without that each one
+        // reads the whole version history and filters in the server, which is the
+        // non-sargable failure this method's history already measured at 6,475,711
+        // rows scanned. The two JOIN tiers filter BOTH sides: a superseded licence
+        // or identifier must not bind, and neither must a live one hanging off a
+        // superseded identity version.
+        //
         // ssn_hash is additionally screened for filler values: a shared placeholder
         // SSN would otherwise collapse every person carrying it into one identity
         // at 0.99 confidence with no name or DOB cross-check. See SsnHashGuard.
         if ($p->ssn_hash && ! $this->ssnGuard->isBlocked($p->ssn_hash)) {
-            $id = $hub->table('gp_identity')->where('ssn_hash', $p->ssn_hash)->where('status', 'active')
+            $id = $hub->table('gp_identity')->where('ssn_hash', $p->ssn_hash)
+                ->where('current', 1)->where('status', 'active')
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
                 return [(int) $id, 'ssn_hash', $this->confidence('ssn_hash', 0.99)];
@@ -146,21 +165,24 @@ class DeterministicResolver
         // would otherwise collapse every person carrying it at 0.99 confidence
         // with no name or DOB cross-check. See JunkKeyGuard.
         if ($p->npi && ! $this->junkGuard->isBlocked('npi', (string) $p->npi)) {
-            $id = $hub->table('gp_identity')->where('npi', $p->npi)->where('status', 'active')
+            $id = $hub->table('gp_identity')->where('npi', $p->npi)
+                ->where('current', 1)->where('status', 'active')
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
                 return [(int) $id, 'npi', $this->confidence('npi', 0.99)];
             }
         }
         if ($p->dea_number) {
-            $id = $hub->table('gp_identity')->where('dea_number', $p->dea_number)->where('status', 'active')
+            $id = $hub->table('gp_identity')->where('dea_number', $p->dea_number)
+                ->where('current', 1)->where('status', 'active')
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
                 return [(int) $id, 'dea_number', $this->confidence('dea_number', 0.99)];
             }
         }
         if ($p->upin) {
-            $id = $hub->table('gp_identity')->where('upin', $p->upin)->where('status', 'active')
+            $id = $hub->table('gp_identity')->where('upin', $p->upin)
+                ->where('current', 1)->where('status', 'active')
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
                 return [(int) $id, 'upin', $this->confidence('upin', 0.99)];
@@ -177,6 +199,8 @@ class DeterministicResolver
         foreach ($identifiers as $ident) {
             $q = $hub->table('gp_identity_identifier as l')
                 ->join('gp_identity as i', 'i.identity_id', '=', 'l.identity_id')
+                ->where('l.current', 1)
+                ->where('i.current', 1)
                 ->where('i.status', 'active')
                 ->where('l.id_type', $ident->id_type)
                 ->where('l.id_value', $ident->id_value);
@@ -194,6 +218,8 @@ class DeterministicResolver
         foreach ($licenses as $lic) {
             $q = $hub->table('gp_license as l')
                 ->join('gp_identity as i', 'i.identity_id', '=', 'l.identity_id')
+                ->where('l.current', 1)
+                ->where('i.current', 1)
                 ->where('i.status', 'active')
                 ->where('l.license_number', $lic->license_number);
             if ($lic->certification_state) {
@@ -216,6 +242,7 @@ class DeterministicResolver
         // which pinned incremental sync at ~0.03 rows/sec.
         if ($p->last_name && $p->first_name && $p->date_of_birth) {
             $id = $hub->table('gp_identity')
+                ->where('current', 1)
                 ->where('status', 'active')
                 ->where('canonical_last', $p->last_name)
                 ->where('canonical_first', $p->first_name)
@@ -260,15 +287,35 @@ class DeterministicResolver
             'confidence' => 1.0,
             'record_count' => 0,
             'status' => 'active',
+            // Explicit rather than leaning on the column defaults: insertGetId()
+            // has to return the identity_id every child row will reference, and a
+            // reader of this method should not have to check the migration to
+            // know which version it produced.
+            'version_no' => 1,
+            'current' => 1,
             'first_seen' => $now,
             'last_updated' => $now,
         ]);
     }
 
-    /** Backfill identity keys that were null when a later row supplies them. */
+    /**
+     * Backfill identity keys that were null when a later row supplies them.
+     *
+     * This used to UPDATE gp_identity in place. Supplying a key the identity did
+     * not have is a change to a golden fact, so under the SCD-2 rule it is a new
+     * version (Data Flow by CAMI: "insert a new row with current = 1, and set all
+     * preexisting rows to current = 0"). Versioner::write() decides: with nothing
+     * to add, $upd is empty and no version is minted; with something to add, the
+     * absent columns carry forward from the previous version so the new row is
+     * complete.
+     */
     private function backfillKeys(int $identityId, object $p): void
     {
-        $id = $this->hub()->table('gp_identity')->where('identity_id', $identityId)->first();
+        $id = $this->versioner->current('gp_identity', ['identity_id' => $identityId]);
+        if (! $id) {
+            return;
+        }
+
         $upd = [];
         foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob'] as $col) {
             $srcCol = $col === 'canonical_dob' ? 'date_of_birth' : $col;
@@ -291,30 +338,60 @@ class DeterministicResolver
             }
         }
         if ($upd) {
-            $this->hub()->table('gp_identity')->where('identity_id', $identityId)->update($upd);
+            $this->versioner->write('gp_identity', ['identity_id' => $identityId], $upd);
         }
     }
 
-    /** Add licenses + addresses + basic attribute provenance for this source row. */
+    /**
+     * Add licenses + addresses + basic attribute provenance for this source row.
+     *
+     * updateOrInsert() became Versioner::write(): a licence, address or
+     * identifier whose attributes changed is superseded rather than
+     * overwritten, and one whose attributes are identical produces nothing at
+     * all. That second half is what keeps resolve() idempotent — every source
+     * row that shares an identity re-observes the same facts, and on the
+     * pile-up identities (identity 3 folds 12,463 source rows) an
+     * unconditional version per observation would multiply gp_license by four
+     * figures with no new information.
+     *
+     * source_link_id is passed as onCreate, not as an attribute, for the same
+     * reason: it records which source row ESTABLISHED the fact. Treating it as
+     * an attribute would make every re-observation from a different account a
+     * change.
+     */
     private function enrich(int $identityId, object $p, $licenses, int $linkId, $identifiers = []): void
     {
         $hub = $this->hub();
 
-        // The per-row path never wrote gp_identity_identifier before this —
-        // only SqlBackfill::enrich() did — which is what made the real-time
+        // The per-row path never wrote gp_identity_identifier before plan 5 —
+        // only SqlBackfill::enrich() did — which is what makes the real-time
         // identifier tier above possible: an earlier row's identifiers are on
-        // the identity by the time a later row is resolved. state is not part
-        // of the unique key, deliberately (see the 2026_09_05_000000
-        // migration), so it is updated rather than matched on here.
+        // the identity by the time a later row is resolved.
+        //
+        // The identifier's fact is very nearly its natural key: re-observing the
+        // same DEA number is not a change, and a withdrawn one is recorded by
+        // retiring the row rather than by writing a different value. `state` is
+        // the one attribute, because the 2026_09_05_000000 migration
+        // deliberately left it out of the unique key, so two sources
+        // disagreeing about which state issued an MMIS number is a versionable
+        // change rather than part of the identity of the row.
         foreach ($identifiers as $ident) {
-            $hub->table('gp_identity_identifier')->updateOrInsert(
-                ['identity_id' => $identityId, 'id_type' => $ident->id_type, 'id_value' => $ident->id_value],
-                ['state' => $ident->state, 'source_link_id' => $linkId],
+            $this->versioner->write(
+                'gp_identity_identifier',
+                [
+                    'identity_id' => $identityId,
+                    'id_type' => $ident->id_type,
+                    'id_value' => $ident->id_value,
+                ],
+                ['state' => $ident->state],
+                [],
+                ['source_link_id' => $linkId],
             );
         }
 
         foreach ($licenses as $lic) {
-            $hub->table('gp_license')->updateOrInsert(
+            $this->versioner->write(
+                'gp_license',
                 [
                     'identity_id' => $identityId,
                     'license_number' => $lic->license_number,
@@ -325,14 +402,16 @@ class DeterministicResolver
                     'license_type' => $lic->license_type,
                     'license_type_id' => $lic->license_type_id,
                     'registry' => $lic->registry,
-                    'source_link_id' => $linkId,
                 ],
+                [],
+                ['source_link_id' => $linkId],
             );
         }
 
         $addrs = $hub->table('stg_person_address')->where('stg_person_id', $p->stg_person_id)->get();
         foreach ($addrs as $a) {
-            $hub->table('gp_address')->updateOrInsert(
+            $this->versioner->write(
+                'gp_address',
                 [
                     'identity_id' => $identityId,
                     'address1' => $a->address1,
@@ -343,8 +422,9 @@ class DeterministicResolver
                 [
                     'address2' => $a->address2,
                     'is_primary' => $a->address_type === 'primary' ? 1 : 0,
-                    'source_link_id' => $linkId,
                 ],
+                [],
+                ['source_link_id' => $linkId],
             );
         }
     }

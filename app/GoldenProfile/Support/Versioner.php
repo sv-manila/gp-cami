@@ -108,11 +108,18 @@ class Versioner
             'updated' => 'date_updated',
         ],
         'gp_identity_identifier' => [
-            // The key is the whole fact. It still gets versioned: a DEA number
-            // being WITHDRAWN is a fact, and the only way to record it is a
-            // version with current = 0.
+            // The key is very nearly the whole fact. It still gets versioned: a
+            // DEA number being WITHDRAWN is a fact, and the only way to record
+            // it is a version with current = 0.
             'key' => ['identity_id', 'id_type', 'id_value'],
-            'attributes' => [],
+            // state is an ATTRIBUTE, not part of the key, because the
+            // 2026_09_05_000000 migration deliberately left it out of the
+            // unique index — MySQL treats NULLs as distinct, and DEA rows
+            // always carry state = NULL, so including it there would stop
+            // de-duplicating them. Two sources disagreeing about which state
+            // issued the same MMIS number is a data anomaly worth recording as
+            // a version, not something to silently keep the first answer for.
+            'attributes' => ['state'],
             'derived' => [],
             'onCreate' => ['source_link_id'],
             'surrogate' => 'id',
@@ -198,7 +205,7 @@ class Versioner
             if ($isCurrent && ! $this->differs($latest, $attributes, $spec['attributes'])) {
                 if ($derived !== []) {
                     $db->table($table)->where($key)->where('current', 1)
-                        ->update($this->only($derived, $spec['derived']));
+                        ->update($this->only($derived, $spec['derived'], $table, 'derived'));
                 }
 
                 return ['version_no' => (int) $latest->version_no, 'new_version' => false];
@@ -221,9 +228,9 @@ class Versioner
             $row = array_replace(
                 $this->carryForward($latest, $spec),
                 $key,
-                $this->only($attributes, $spec['attributes']),
-                $this->only($derived, $spec['derived']),
-                $latest === null ? $this->only($onCreate, $spec['onCreate']) : [],
+                $this->only($attributes, $spec['attributes'], $table, 'an attribute'),
+                $this->only($derived, $spec['derived'], $table, 'derived'),
+                $latest === null ? $this->only($onCreate, $spec['onCreate'], $table, 'onCreate') : [],
                 [
                     'version_no' => $version,
                     'current' => 1,
@@ -389,9 +396,34 @@ class Versioner
         return $row;
     }
 
-    /** @return array<string,mixed> */
-    private function only(array $values, array $allowed): array
+    /**
+     * Narrow a payload to the columns the table declares for that category.
+     *
+     * Throws rather than dropping. A silently discarded column is the worst
+     * failure this class can have: it writes a row that looks complete, breaks
+     * a downstream read that filters on the missing value, and points nowhere
+     * near itself. That is not hypothetical — `state` was undeclared on
+     * gp_identity_identifier, so enrich()'s MMIS writes landed with a NULL
+     * state, the state-scoped identifier tier stopped matching, and the eval
+     * gate moved to 1 false split. The symptom was three tables away from the
+     * cause.
+     *
+     * @return array<string,mixed>
+     */
+    private function only(array $values, array $allowed, string $table, string $category): array
     {
+        $undeclared = array_diff(array_keys($values), $allowed);
+
+        if ($undeclared !== []) {
+            throw new InvalidArgumentException(sprintf(
+                '%s does not declare %s as %s; add it to the spec in Versioner::TABLES '.
+                'or the value would be silently dropped',
+                $table,
+                implode(', ', $undeclared),
+                $category,
+            ));
+        }
+
         return array_intersect_key($values, array_flip($allowed));
     }
 
