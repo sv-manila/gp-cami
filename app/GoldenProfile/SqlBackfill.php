@@ -455,53 +455,101 @@ class SqlBackfill
         return $this->quarantine->evaluate($personRow, $licenses, $identifiers) !== null;
     }
 
-    /** Populate gp_license + gp_address from the staged children (set-based). */
+    /**
+     * Populate gp_license + gp_address + gp_identity_identifier from the staged
+     * children (set-based).
+     *
+     * Each statement used to be INSERT … ON DUPLICATE KEY UPDATE
+     * source_link_id=VALUES(source_link_id). Neither half of that survives SCD-2:
+     *
+     *   - the ON DUPLICATE KEY target is gone. uq_lic, uq_addr and
+     *     uq_identity_identifier now END IN version_no
+     *     (2026_09_04_000100_add_scd2_versioning), so a re-observation does not
+     *     collide with the existing row — it inserts a duplicate.
+     *   - the UPDATE half overwrote a golden fact in place, which is what this
+     *     programme exists to stop, and it rewrote source_link_id, which is
+     *     onCreate: it records which source row ESTABLISHED the fact, so treating
+     *     it as an attribute would mint a version every time a second account's
+     *     employee row re-observed the same licence (thousands of identical
+     *     versions on identity 3, which folds 12,463 source rows).
+     *
+     * So each becomes: build the incoming set into a scratch table, hand it to
+     * SetVersionWriter::write(), which compares it against the current version per
+     * natural key and flips-and-inserts only what differs. The per-row counterpart
+     * (DeterministicResolver::enrich()) makes the same decision through
+     * Versioner::write().
+     *
+     * is_verified IS DELIBERATELY ABSENT from the licence statement, where it used
+     * to be a literal 0. The per-row path never passes it, so under versioning the
+     * literal would reset a verified licence AND mint a version recording the
+     * reset, on every bulk run. Omitted, a new row takes the column default (0, the
+     * same value) and an existing one keeps what it has.
+     *
+     * The GROUP BYs are unchanged, and so is the fact that they pick MAX() where the
+     * per-row path takes the last observation. That divergence predates SCD-2 and is
+     * left alone — see the divergence table in docs/SCD2.md.
+     */
     public function enrich(): void
     {
-        $this->hub()->statement(
-            'INSERT INTO gp_license
-                (identity_id, license_number, certification_state, certification_board,
-                 license_type, license_type_id, registry, is_verified, source_link_id)
+        $hub = $this->hub();
+        $writer = new SetVersionWriter;
+
+        // gp_license
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_license');
+        $hub->statement(
+            'CREATE TEMPORARY TABLE tmp_enrich_license
+                (INDEX idx_key (identity_id, license_number, certification_state, certification_board))
+             ENGINE=InnoDB AS
              SELECT l.identity_id, spl.license_number, spl.certification_state, spl.certification_board,
-                 MAX(spl.license_type), MAX(spl.license_type_id), MAX(spl.registry), 0, MIN(l.link_id)
+                 MAX(spl.license_type) AS license_type, MAX(spl.license_type_id) AS license_type_id,
+                 MAX(spl.registry) AS registry, MIN(l.link_id) AS source_link_id
              FROM stg_person_license spl
              JOIN stg_person sp ON sp.stg_person_id = spl.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
-             GROUP BY l.identity_id, spl.license_number, spl.certification_state, spl.certification_board
-             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)',
-            []
+             GROUP BY l.identity_id, spl.license_number, spl.certification_state, spl.certification_board'
         );
+        $writer->write('gp_license', 'tmp_enrich_license', ['license_type', 'license_type_id', 'registry']);
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_license');
 
-        $this->hub()->statement(
-            "INSERT INTO gp_address
-                (identity_id, address1, address2, city, state, zip, is_primary, source_link_id)
-             SELECT l.identity_id, spa.address1, MAX(spa.address2), spa.city, spa.state, spa.zip,
-                 MAX(spa.address_type='primary'), MIN(l.link_id)
+        // gp_address
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_address');
+        $hub->statement(
+            "CREATE TEMPORARY TABLE tmp_enrich_address
+                (INDEX idx_key (identity_id, address1, city, state, zip))
+             ENGINE=InnoDB AS
+             SELECT l.identity_id, spa.address1, spa.city, spa.state, spa.zip,
+                 MAX(spa.address2) AS address2,
+                 MAX(spa.address_type='primary') AS is_primary,
+                 MIN(l.link_id) AS source_link_id
              FROM stg_person_address spa
              JOIN stg_person sp ON sp.stg_person_id = spa.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
-             GROUP BY l.identity_id, spa.address1, spa.city, spa.state, spa.zip
-             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)",
-            []
+             GROUP BY l.identity_id, spa.address1, spa.city, spa.state, spa.zip"
         );
+        $writer->write('gp_address', 'tmp_enrich_address', ['address2', 'is_primary']);
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_address');
 
-        // Multi-valued identifiers (DEA, MMIS). dedup then merges identities
-        // that share one — this is how DEA/MMIS act as match keys.
-        $this->hub()->statement(
-            // state is not part of the unique key (identity_id, id_type, id_value)
-            // — see the 2026_09_05_000000 migration for why adding it there would
-            // break DEA de-duplication. MAX(spi.state) picks a single
-            // deterministic value when more than one staged row disagrees, the
-            // same pattern already used for MAX(spl.license_type) above.
-            'INSERT INTO gp_identity_identifier (identity_id, id_type, id_value, state, source_link_id)
-             SELECT l.identity_id, spi.id_type, spi.id_value, MAX(spi.state), MIN(l.link_id)
+        // gp_identity_identifier. Multi-valued identifiers (DEA, MMIS); dedup then
+        // merges identities that share one, which is how DEA/MMIS act as match keys.
+        //
+        // state is the one compared attribute — plan 5 put it there deliberately,
+        // because the 2026_09_05_000000 migration left it out of the unique key, so
+        // two sources disagreeing about which state issued an MMIS number is a
+        // versionable change rather than part of the row's identity.
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_identifier');
+        $hub->statement(
+            'CREATE TEMPORARY TABLE tmp_enrich_identifier
+                (INDEX idx_key (identity_id, id_type, id_value))
+             ENGINE=InnoDB AS
+             SELECT l.identity_id, spi.id_type, spi.id_value,
+                 MAX(spi.state) AS state, MIN(l.link_id) AS source_link_id
              FROM stg_person_identifier spi
              JOIN stg_person sp ON sp.stg_person_id = spi.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
-             GROUP BY l.identity_id, spi.id_type, spi.id_value
-             ON DUPLICATE KEY UPDATE state=VALUES(state), source_link_id=VALUES(source_link_id)',
-            []
+             GROUP BY l.identity_id, spi.id_type, spi.id_value'
         );
+        $writer->write('gp_identity_identifier', 'tmp_enrich_identifier', ['state']);
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_enrich_identifier');
     }
 
     /** Populate each active identity's null keys from its linked staged rows. */
@@ -872,43 +920,92 @@ class SqlBackfill
 
     // ---- 3. ROLLUP (set-based) --------------------------------------------
 
+    /**
+     * credential_matches / matches -> gp_identity_credential + gp_identity_exclusion
+     * (set-based, from the mirrored src_* transport buffers).
+     *
+     * Both statements used to end in ON DUPLICATE KEY UPDATE, including
+     * identity_id=VALUES(identity_id). Two changes, for two different reasons:
+     *
+     *   - the upsert becomes a versioned write. Both tables' primary keys now end
+     *     in version_no (2026_09_04_000100_add_scd2_versioning), so ON DUPLICATE
+     *     KEY no longer matches an existing row at all — and where it still would,
+     *     on uq_cred_current, the UPDATE half would overwrite a golden fact in
+     *     place. A credential whose status, validity or CAMI currency flag moved is
+     *     now superseded; one that came back identical produces nothing, which
+     *     matters because sync re-reads every credential of every changed employee
+     *     on every run.
+     *   - identity_id STOPS BEING REPOINTED HERE. 3a made it onCreate: repointing on
+     *     a merge is a GROUPING change, recorded in gp_resolution_log and on the
+     *     merged identity's own final version, and versioning it would mint one row
+     *     per credential per merge — 397,170 for identity 3 alone.
+     *     Engine::applyMerge() owns the repoint, as a bulk UPDATE across all
+     *     versions where no unique can collide.
+     *
+     * link_confidence is in Versioner's attribute list for both tables and is passed
+     * by no path, per-row or set-based, so it carries forward. Do not "fix" that by
+     * writing a float into it: a DECIMAL(5,4) round-trips as '0.9900' and
+     * Versioner::same() would then report a change on every write forever.
+     *
+     * ONE DUPLICATE-ROW HAZARD the scratch tables introduce, and why it is safe:
+     * SetVersionWriter::write() requires exactly one row per natural key. Both
+     * builds satisfy that because credential_match_id / match_id is the source's
+     * primary key and gp_source_link's uq_source(system_id, source_table,
+     * source_id) means the join to l cannot fan out. If a future change makes
+     * either fan out, the symptom is a duplicate-key error from uq_cred_current on
+     * the insert — loud, immediate, and the reason 3a built that index.
+     */
     public function rollup(): void
     {
+        $hub = $this->hub();
         $sys = $this->systemId;
-        $exclude = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
-        $excludeSql = $exclude ? 'AND c.match_summary_status_code NOT IN ('.implode(',', array_map('intval', $exclude)).')' : '';
+        $writer = new SetVersionWriter;
 
-        $this->hub()->statement(
-            "INSERT INTO gp_identity_credential
-                (system_id, credential_match_id, identity_id, registry, match_summary_status,
-                 match_summary_status_code, match_is_valid, source_current, date_resolved, link_state)
-             SELECT ?, c.id, l.identity_id, c.registry, c.match_summary_status,
-                 c.match_summary_status_code, c.match_is_valid, c.current, c.date_resolved, 'confirmed'
+        $exclude = config('golden_profile.credential_search.rollup_exclude_status_codes', []);
+        $excludeSql = $exclude
+            ? 'AND c.match_summary_status_code NOT IN ('.implode(',', array_map('intval', $exclude)).')'
+            : '';
+
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_rollup_credential');
+        $hub->statement(
+            "CREATE TEMPORARY TABLE tmp_rollup_credential
+                (INDEX idx_key (system_id, credential_match_id))
+             ENGINE=InnoDB AS
+             SELECT ? AS system_id, c.id AS credential_match_id, l.identity_id,
+                 c.registry, c.match_summary_status, c.match_summary_status_code,
+                 c.match_is_valid, c.`current` AS source_current, c.date_resolved,
+                 'confirmed' AS link_state
              FROM src_credential_match c
              JOIN gp_source_link l ON l.system_id=? AND l.source_table='employees' AND l.source_id=c.employee_id
-             WHERE 1=1 $excludeSql
-             ON DUPLICATE KEY UPDATE identity_id=VALUES(identity_id), registry=VALUES(registry),
-                 match_summary_status=VALUES(match_summary_status), match_summary_status_code=VALUES(match_summary_status_code),
-                 match_is_valid=VALUES(match_is_valid), source_current=VALUES(source_current),
-                 date_resolved=VALUES(date_resolved), link_state='confirmed'",
+             WHERE 1=1 $excludeSql",
             [$sys, $sys]
         );
+        $writer->write('gp_identity_credential', 'tmp_rollup_credential', [
+            'registry', 'match_summary_status', 'match_summary_status_code',
+            'match_is_valid', 'source_current', 'date_resolved', 'link_state',
+        ]);
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_rollup_credential');
 
-        $this->hub()->statement(
-            "INSERT INTO gp_identity_exclusion
-                (system_id, match_id, identity_id, exclusion_record_id, registry, is_ssn_match, is_npi_match,
-                 is_canonical_name_match, is_upin_match, is_license_number_match, link_state)
-             SELECT ?, m.id, l.identity_id, m.exclusion_record_id, er.exclusion_list_prefix,
-                 m.is_ssn_match, m.is_npi_match, m.is_canonical_name_match, m.is_upin_match, m.is_license_number_match, 'candidate'
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_rollup_exclusion');
+        $hub->statement(
+            "CREATE TEMPORARY TABLE tmp_rollup_exclusion
+                (INDEX idx_key (system_id, match_id))
+             ENGINE=InnoDB AS
+             SELECT ? AS system_id, m.id AS match_id, l.identity_id,
+                 m.exclusion_record_id, er.exclusion_list_prefix AS registry,
+                 m.is_ssn_match, m.is_npi_match, m.is_canonical_name_match,
+                 m.is_upin_match, m.is_license_number_match,
+                 'candidate' AS link_state
              FROM src_match m
              JOIN gp_source_link l ON l.system_id=? AND l.source_table='employees' AND l.source_id=m.employee_id
-             LEFT JOIN src_exclusion_record er ON er.id = m.exclusion_record_id
-             ON DUPLICATE KEY UPDATE identity_id=VALUES(identity_id), exclusion_record_id=VALUES(exclusion_record_id),
-                 registry=VALUES(registry), is_ssn_match=VALUES(is_ssn_match), is_npi_match=VALUES(is_npi_match),
-                 is_canonical_name_match=VALUES(is_canonical_name_match), is_upin_match=VALUES(is_upin_match),
-                 is_license_number_match=VALUES(is_license_number_match), link_state='candidate'",
+             LEFT JOIN src_exclusion_record er ON er.id = m.exclusion_record_id",
             [$sys, $sys]
         );
+        $writer->write('gp_identity_exclusion', 'tmp_rollup_exclusion', [
+            'exclusion_record_id', 'registry', 'is_ssn_match', 'is_npi_match',
+            'is_canonical_name_match', 'is_upin_match', 'is_license_number_match', 'link_state',
+        ]);
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_rollup_exclusion');
     }
 
     // ---- helpers ----------------------------------------------------------
