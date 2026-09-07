@@ -52,6 +52,7 @@ class DeterministicResolver
         $hub = $this->hub();
         $p = $hub->table('stg_person')->where('stg_person_id', $stgPersonId)->first();
         $licenses = $hub->table('stg_person_license')->where('stg_person_id', $stgPersonId)->get();
+        $identifiers = $hub->table('stg_person_identifier')->where('stg_person_id', $stgPersonId)->get();
 
         // Idempotent: an existing link for this source row wins.
         $existing = $hub->table('gp_source_link')->where([
@@ -64,13 +65,13 @@ class DeterministicResolver
             $identityId = (int) $existing->identity_id;
             // A pinned link is a locked human decision — never re-matched or re-enriched.
             if (! $existing->is_pinned) {
-                $this->enrich($identityId, $p, $licenses, (int) $existing->link_id);
+                $this->enrich($identityId, $p, $licenses, (int) $existing->link_id, $identifiers);
             }
 
             return $identityId;
         }
 
-        [$identityId, $key, $conf] = $this->matchDeterministic($p, $licenses);
+        [$identityId, $key, $conf] = $this->matchDeterministic($p, $licenses, $identifiers);
         $method = 'deterministic';
         $matchState = 'auto_match';
 
@@ -114,13 +115,13 @@ class DeterministicResolver
 
         // record_count + freshness are set during finalize (Survivorship),
         // which already loads every linked row — avoids a per-row COUNT+UPDATE.
-        $this->enrich($identityId, $p, $licenses, $linkId);
+        $this->enrich($identityId, $p, $licenses, $linkId, $identifiers);
 
         return $identityId;
     }
 
     /** @return array{0:?int,1:?string,2:?float} [identity_id, match_key, confidence] */
-    private function matchDeterministic(object $p, $licenses): array
+    private function matchDeterministic(object $p, $licenses, $identifiers = []): array
     {
         $hub = $this->hub();
 
@@ -163,6 +164,30 @@ class DeterministicResolver
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
                 return [(int) $id, 'upin', $this->confidence('upin', 0.99)];
+            }
+        }
+        // Multi-valued identifiers (DEA, MMIS). Real-time here because each
+        // row is resolved sequentially — by the time THIS row is resolved,
+        // every earlier row's enrich() call (below) has already written any
+        // identifier it carried into gp_identity_identifier, so there is no
+        // chicken-and-egg the way there would be for a set-based bulk tier
+        // (see this task's docblock, and the existing comment in
+        // SqlBackfill::resolveDeterministic() about why license works the
+        // same way). MMIS is scoped by state; DEA (federal) is not.
+        foreach ($identifiers as $ident) {
+            $q = $hub->table('gp_identity_identifier as l')
+                ->join('gp_identity as i', 'i.identity_id', '=', 'l.identity_id')
+                ->where('i.status', 'active')
+                ->where('l.id_type', $ident->id_type)
+                ->where('l.id_value', $ident->id_value);
+            if ($ident->id_type === 'mmis') {
+                $ident->state === null ? $q->whereNull('l.state') : $q->where('l.state', $ident->state);
+            }
+            $id = $q->orderBy('l.identity_id')->value('l.identity_id');
+            if ($id) {
+                $confKey = $ident->id_type === 'mmis' ? 'mmis+state' : 'dea_multi';
+
+                return [(int) $id, $confKey, $this->confidence($confKey, 0.99)];
             }
         }
         // license_number + certification_state (any of the person's licenses)
@@ -271,9 +296,22 @@ class DeterministicResolver
     }
 
     /** Add licenses + addresses + basic attribute provenance for this source row. */
-    private function enrich(int $identityId, object $p, $licenses, int $linkId): void
+    private function enrich(int $identityId, object $p, $licenses, int $linkId, $identifiers = []): void
     {
         $hub = $this->hub();
+
+        // The per-row path never wrote gp_identity_identifier before this —
+        // only SqlBackfill::enrich() did — which is what made the real-time
+        // identifier tier above possible: an earlier row's identifiers are on
+        // the identity by the time a later row is resolved. state is not part
+        // of the unique key, deliberately (see the 2026_09_05_000000
+        // migration), so it is updated rather than matched on here.
+        foreach ($identifiers as $ident) {
+            $hub->table('gp_identity_identifier')->updateOrInsert(
+                ['identity_id' => $identityId, 'id_type' => $ident->id_type, 'id_value' => $ident->id_value],
+                ['state' => $ident->state, 'source_link_id' => $linkId],
+            );
+        }
 
         foreach ($licenses as $lic) {
             $hub->table('gp_license')->updateOrInsert(

@@ -26,8 +26,18 @@ return [
     'deterministic_keys' => [
         'ssn_hash' => 0.99,
         'npi' => 0.99,
+        // Vestigial for this source: stg_person.dea_number is always null from
+        // StreamlineLocalConnector (DEA is multi-valued in this source, staged
+        // into stg_person_identifier instead — see dea_multi below). Left
+        // configured rather than removed since gp_identity.dea_number and this
+        // tier are harmless dead code, not a bug to fix in this plan.
         'dea_number' => 0.99,
         'upin' => 0.99,
+        // Multi-valued identifiers from gp_identity_identifier (Task 9). DEA is
+        // federal (never state-scoped); MMIS is inherently state-scoped — see
+        // the identifier tier in DeterministicResolver::matchDeterministic().
+        'dea_multi' => 0.99,
+        'mmis+state' => 0.99,
         'license_number+certification_state' => 0.99,
         'name+dob' => 0.95,
     ],

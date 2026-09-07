@@ -460,13 +460,18 @@ class SqlBackfill
         // Multi-valued identifiers (DEA, MMIS). dedup then merges identities
         // that share one — this is how DEA/MMIS act as match keys.
         $this->hub()->statement(
-            'INSERT INTO gp_identity_identifier (identity_id, id_type, id_value, source_link_id)
-             SELECT l.identity_id, spi.id_type, spi.id_value, MIN(l.link_id)
+            // state is not part of the unique key (identity_id, id_type, id_value)
+            // — see the 2026_09_05_000000 migration for why adding it there would
+            // break DEA de-duplication. MAX(spi.state) picks a single
+            // deterministic value when more than one staged row disagrees, the
+            // same pattern already used for MAX(spl.license_type) above.
+            'INSERT INTO gp_identity_identifier (identity_id, id_type, id_value, state, source_link_id)
+             SELECT l.identity_id, spi.id_type, spi.id_value, MAX(spi.state), MIN(l.link_id)
              FROM stg_person_identifier spi
              JOIN stg_person sp ON sp.stg_person_id = spi.stg_person_id
              JOIN gp_source_link l ON l.system_id=sp.system_id AND l.source_table=sp.source_table AND l.source_id=sp.source_id
              GROUP BY l.identity_id, spi.id_type, spi.id_value
-             ON DUPLICATE KEY UPDATE source_link_id=VALUES(source_link_id)',
+             ON DUPLICATE KEY UPDATE state=VALUES(state), source_link_id=VALUES(source_link_id)',
             []
         );
     }

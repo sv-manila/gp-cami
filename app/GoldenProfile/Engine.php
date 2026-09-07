@@ -376,16 +376,23 @@ class Engine
         $q = $hub->table('gp_identity_identifier as gii')
             ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
             ->where('gi.status', 'active')
-            ->select('gii.id_type', 'gii.id_value');
-        $q = $this->shardFilter($q, "CONCAT_WS('|',gii.id_type,gii.id_value)", $shard, $shards);
-        $groups = $q->groupBy('gii.id_type', 'gii.id_value')
+            ->select('gii.id_type', 'gii.id_value', 'gii.state');
+        $q = $this->shardFilter($q, "CONCAT_WS('|',gii.id_type,gii.id_value,gii.state)", $shard, $shards);
+        // gii.state is part of the GROUP BY (unlike the storage unique key,
+        // which deliberately omits it — see the 2026_09_05_000000 migration):
+        // two different states' identical MMIS number must never be treated as
+        // one match group, or this pass would fold unrelated providers
+        // together. Verified: before this change, MMIS-4471/CA and
+        // MMIS-4471/TX merged into one identity.
+        $groups = $q->groupBy('gii.id_type', 'gii.id_value', 'gii.state')
             ->havingRaw('COUNT(DISTINCT gii.identity_id) > 1')->get();
         foreach ($groups as $g) {
-            $ids = $hub->table('gp_identity_identifier as gii')
+            $sub = $hub->table('gp_identity_identifier as gii')
                 ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
                 ->where('gi.status', 'active')
-                ->where('gii.id_type', $g->id_type)->where('gii.id_value', $g->id_value)
-                ->orderBy('gii.identity_id')->distinct()->pluck('gii.identity_id')->all();
+                ->where('gii.id_type', $g->id_type)->where('gii.id_value', $g->id_value);
+            $sub = $g->state === null ? $sub->whereNull('gii.state') : $sub->where('gii.state', $g->state);
+            $ids = $sub->orderBy('gii.identity_id')->distinct()->pluck('gii.identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
                 $n += $this->mergeIdentity($survivor, (int) $loser);

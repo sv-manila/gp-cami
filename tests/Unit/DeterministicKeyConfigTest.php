@@ -16,7 +16,7 @@ class DeterministicKeyConfigTest extends TestCase
     {
         $keys = config('golden_profile.deterministic_keys');
 
-        foreach (['ssn_hash', 'npi', 'dea_number', 'upin', 'license_number+certification_state', 'name+dob'] as $tier) {
+        foreach (['ssn_hash', 'npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state', 'license_number+certification_state', 'name+dob'] as $tier) {
             $this->assertArrayHasKey($tier, $keys, "tier $tier has no configured confidence");
             $this->assertGreaterThan(0.0, $keys[$tier]);
             $this->assertLessThanOrEqual(1.0, $keys[$tier]);
@@ -29,7 +29,7 @@ class DeterministicKeyConfigTest extends TestCase
 
         // A shared common name plus a shared birthday is weaker evidence than a
         // shared SSN or NPI; if that ordering inverts, the tier order is wrong.
-        foreach (['ssn_hash', 'npi', 'dea_number', 'upin'] as $strong) {
+        foreach (['ssn_hash', 'npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state'] as $strong) {
             $this->assertLessThan($keys[$strong], $keys['name+dob']);
         }
     }
@@ -42,9 +42,10 @@ class DeterministicKeyConfigTest extends TestCase
         // 0.95 literals in the match tiers are the regression this guards against.
         $this->assertStringContainsString('golden_profile.deterministic_keys', $source);
         $this->assertSame(
-            6,
+            7,
             preg_match_all('/\$this->confidence\(/', $source),
-            'each of the 6 deterministic tiers should take its confidence from config',
+            'the 6 original tiers plus the new multi-valued identifier tier '
+            .'(dea_multi/mmis+state, which shares one call site via $confKey) should be 7',
         );
     }
 
