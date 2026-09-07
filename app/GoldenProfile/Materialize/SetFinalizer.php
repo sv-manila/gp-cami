@@ -282,7 +282,7 @@ class SetFinalizer
         $cred = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('credential_match_id',credential_match_id,'registry',registry,
                         'status',match_summary_status,'status_code',match_summary_status_code,
-                        'valid',{$jb('match_is_valid=1')},'current',{$jb('`current`=1')},'link_state',link_state)) js
+                        'valid',{$jb('match_is_valid=1')},'current',{$jb('source_current=1')},'link_state',link_state)) js
                  FROM gp_identity_credential WHERE $r GROUP BY identity_id";
 
         $excl = "SELECT identity_id, COUNT(*) cnt,

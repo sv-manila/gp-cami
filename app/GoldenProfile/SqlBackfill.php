@@ -710,7 +710,7 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity_credential
                 (system_id, credential_match_id, identity_id, registry, match_summary_status,
-                 match_summary_status_code, match_is_valid, current, date_resolved, link_state)
+                 match_summary_status_code, match_is_valid, source_current, date_resolved, link_state)
              SELECT ?, c.id, l.identity_id, c.registry, c.match_summary_status,
                  c.match_summary_status_code, c.match_is_valid, c.current, c.date_resolved, 'confirmed'
              FROM src_credential_match c
@@ -718,7 +718,7 @@ class SqlBackfill
              WHERE 1=1 $excludeSql
              ON DUPLICATE KEY UPDATE identity_id=VALUES(identity_id), registry=VALUES(registry),
                  match_summary_status=VALUES(match_summary_status), match_summary_status_code=VALUES(match_summary_status_code),
-                 match_is_valid=VALUES(match_is_valid), current=VALUES(current),
+                 match_is_valid=VALUES(match_is_valid), source_current=VALUES(source_current),
                  date_resolved=VALUES(date_resolved), link_state='confirmed'",
             [$sys, $sys]
         );

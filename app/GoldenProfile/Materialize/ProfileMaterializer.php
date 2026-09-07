@@ -81,7 +81,10 @@ class ProfileMaterializer
             ->map(fn ($c) => [
                 'credential_match_id' => (int) $c->credential_match_id, 'registry' => $c->registry,
                 'status' => $c->match_summary_status, 'status_code' => $c->match_summary_status_code,
-                'valid' => (bool) $c->match_is_valid, 'current' => (bool) $c->current,
+                // The JSON key stays `current` (published response shape); the
+                // column behind it is source_current — CAMI's flag, not the
+                // version flag.
+                'valid' => (bool) $c->match_is_valid, 'current' => (bool) $c->source_current,
                 'link_state' => $c->link_state,
             ])->values();
 

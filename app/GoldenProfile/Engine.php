@@ -658,7 +658,9 @@ class Engine
                 'match_summary_status' => $c->match_summary_status,
                 'match_summary_status_code' => $c->match_summary_status_code,
                 'match_is_valid' => $c->match_is_valid,
-                'current' => $c->current,
+                // CAMI's own currency flag, mirrored. Named source_current because
+                // `current` is the SCD-2 version flag on this table.
+                'source_current' => $c->current,
                 'date_resolved' => $this->dt($c->date_resolved),
                 'link_state' => 'confirmed',
             ];
@@ -669,7 +671,7 @@ class Engine
                 $batch,
                 ['system_id', 'credential_match_id'],
                 ['identity_id', 'registry', 'match_summary_status', 'match_summary_status_code',
-                    'match_is_valid', 'current', 'date_resolved', 'link_state'],
+                    'match_is_valid', 'source_current', 'date_resolved', 'link_state'],
             );
         }
         foreach (array_chunk($deleteIds, 1000) as $batch) {

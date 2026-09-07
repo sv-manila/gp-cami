@@ -308,7 +308,9 @@ class CredentialSearchController extends Controller
             'match_summary_status' => $row->match_summary_status,
             'match_summary_status_code' => $row->match_summary_status_code,
             'match_is_valid' => (bool) $row->match_is_valid,
-            'current' => (bool) $row->current,
+            // Response field name unchanged; the source column was renamed to free
+            // `current` for the SCD-2 version flag.
+            'current' => (bool) $row->source_current,
             'expiry_date' => $row->expiry_date,
             'date_resolved' => $row->date_resolved,
         ];
