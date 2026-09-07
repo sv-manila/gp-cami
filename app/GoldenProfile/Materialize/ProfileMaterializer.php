@@ -158,8 +158,6 @@ class ProfileMaterializer
                 'last_name' => $identity->canonical_last,
                 'suffix' => $identity->canonical_suffix ?? null,
                 'date_of_birth' => $identity->canonical_dob,
-                'ssn_hash' => $identity->ssn_hash,
-                'ssn_last_four' => $this->ssnLastFour($stgIds),
                 'npi' => $identity->npi,
                 'upin' => $identity->upin,
                 'dea_number' => $identity->dea_number ?: $deaFromIdentifier,
@@ -221,25 +219,5 @@ class ProfileMaterializer
         }
 
         return $ids->unique()->values();
-    }
-
-    /**
-     * Lowest stg_person_id with a non-null ssn_last_four — the same pick as
-     * SetFinalizer's $ssn4 window (ORDER BY stg_person_id ASC). Without the
-     * ordering this returned whichever row the server offered first, so the two
-     * paths could disagree on an identity with more than one staged SSN tail.
-     *
-     * Deleted by plan 2 along with the column.
-     */
-    private function ssnLastFour($stgIds): ?string
-    {
-        if ($stgIds->isEmpty()) {
-            return null;
-        }
-
-        return $this->hub()->table('stg_person')->whereIn('stg_person_id', $stgIds)
-            ->whereNotNull('ssn_last_four')
-            ->orderBy('stg_person_id')
-            ->value('ssn_last_four');
     }
 }

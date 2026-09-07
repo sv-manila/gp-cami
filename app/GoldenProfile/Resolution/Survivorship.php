@@ -28,7 +28,16 @@ class Survivorship
         return DB::connection('golden_profile');
     }
 
-    /** identity field <- staged column */
+    /**
+     * identity field <- staged column.
+     *
+     * Must stay identical, in content AND order, to
+     * SetFinalizer::IDENTITY_FIELDS — the two classes are the per-row and
+     * set-based halves of the same computation and ProfileHasNoSsnTest asserts
+     * they agree. ssn_hash was the last entry; the GPP conformance programme
+     * removed it (Delivery Checklist §1), which also stops the hash being copied
+     * into gp_attribute and gp_survivorship_audit on every recompute.
+     */
     private const IDENTITY_FIELDS = [
         'canonical_first' => 'first_name',
         'canonical_middle' => 'middle_name',
@@ -38,7 +47,6 @@ class Survivorship
         'npi' => 'npi',
         'upin' => 'upin',
         'dea_number' => 'dea_number',
-        'ssn_hash' => 'ssn_hash',
     ];
 
     public function recompute(int $identityId): void

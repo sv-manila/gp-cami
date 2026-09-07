@@ -75,8 +75,12 @@ class StreamlineLocalConnector
             'middle_name' => $this->cleanName($emp->middle_name),
             'last_name' => $this->cleanName($emp->last_name),
             'date_of_birth' => $this->date($emp->date_of_birth),
-            'ssn_hash' => $emp->ssn_hash ?: null,          // ingest as-is (global key)
-            'ssn_last_four' => $emp->ssn_last_four ?: null,
+            // No ssn_hash / ssn_last_four. This mapping is the boundary at which
+            // gp-cami stops reading SSN-derived data from streamline_local
+            // entirely — Delivery Checklist §1, "stream internal verified data via
+            // CDC (never store SSN)". The source columns still exist; the hub
+            // simply never selects them. stage() does `select *`, so nothing else
+            // needs changing to make that true.
             'npi' => $npiValid ? $npi : null,
             'upin' => $emp->upin ?: null,
             'dea_number' => null,                          // not present in this source

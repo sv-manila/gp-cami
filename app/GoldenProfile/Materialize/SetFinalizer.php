@@ -26,7 +26,14 @@ use Illuminate\Support\Facades\DB;
  */
 class SetFinalizer
 {
-    /** identity canonical column <= staged column (same map as Survivorship). */
+    /**
+     * identity canonical column <= staged column.
+     *
+     * Must stay identical, in content AND order, to
+     * Resolution\Survivorship::IDENTITY_FIELDS. ProfileHasNoSsnTest asserts it —
+     * the two were documented as the same map for a long time with nothing
+     * enforcing it.
+     */
     private const IDENTITY_FIELDS = [
         'canonical_first' => 'first_name',
         'canonical_middle' => 'middle_name',
@@ -36,7 +43,6 @@ class SetFinalizer
         'npi' => 'npi',
         'upin' => 'upin',
         'dea_number' => 'dea_number',
-        'ssn_hash' => 'ssn_hash',
     ];
 
     private AliasIndexer $aliasIndexer;
@@ -432,7 +438,7 @@ class SetFinalizer
         // gp_board_action and gp_identity_resolution are absent on purpose: the
         // first is append-only, and the second was already SCD-2 before this
         // programme and is filtered on its own is_current flag below. So are $src,
-        // $acct, $alias, $term and $ssn4 — they read gp_source_link and stg_person,
+        // $acct, $alias and $term — they read gp_source_link and stg_person,
         // neither of which is versioned, so `current` = 1 there would be a fatal
         // Unknown column (which is the good kind of wrong).
         $rv = "$r AND `current` = 1";
@@ -517,11 +523,9 @@ class SetFinalizer
                         ROW_NUMBER() OVER (PARTITION BY l.identity_id ORDER BY sp.source_modified DESC, sp.stg_person_id DESC) rn
                     FROM gp_source_link l JOIN stg_person sp ON $link WHERE $rL ) t WHERE rn = 1";
 
-        $ssn4 = "SELECT identity_id, ssn_last_four FROM (
-                    SELECT l.identity_id, sp.ssn_last_four,
-                        ROW_NUMBER() OVER (PARTITION BY l.identity_id ORDER BY sp.stg_person_id ASC) rn
-                    FROM gp_source_link l JOIN stg_person sp ON $link
-                    WHERE sp.ssn_last_four IS NOT NULL AND $rL ) t WHERE rn = 1";
+        // No $ssn4 window. It picked gp_identity_profile.ssn_last_four, which the
+        // GPP conformance programme removed along with the hash — see the note on
+        // IDENTITY_FIELDS above.
 
         // Idempotent per chunk: clear the slice, then rebuild it.
         $hub->statement("DELETE FROM gp_identity_profile WHERE $r");
@@ -529,7 +533,7 @@ class SetFinalizer
         $hub->statement("
         INSERT INTO gp_identity_profile
             (identity_id, identity_uuid, first_name, middle_name, last_name, suffix, date_of_birth,
-             ssn_hash, ssn_last_four, npi, upin, dea_number, identifier_count, identifiers,
+             npi, upin, dea_number, identifier_count, identifiers,
              address1, city, state, zip, address_count, addresses, `terminated`,
              license_count, licenses, confidence, record_count, account_count, system_count,
              aliases, source_records, accounts, credential_count, credentials,
@@ -538,7 +542,7 @@ class SetFinalizer
              resolution_count, resolutions, first_seen, last_updated, profile_built_at)
         SELECT
             i.identity_id, i.identity_uuid, i.canonical_first, i.canonical_middle, i.canonical_last,
-            i.canonical_suffix, i.canonical_dob, i.ssn_hash, ssn4.ssn_last_four, i.npi, i.upin,
+            i.canonical_suffix, i.canonical_dob, i.npi, i.upin,
             COALESCE(NULLIF(i.dea_number,''), idt.dea) dea_number,
             COALESCE(idt.cnt,0), COALESCE(idt.js, JSON_ARRAY()),
             prim.address1, prim.city, prim.state, prim.zip,
@@ -566,7 +570,6 @@ class SetFinalizer
         LEFT JOIN ($acct) acct   ON acct.identity_id = i.identity_id
         LEFT JOIN ($alias) alias ON alias.identity_id = i.identity_id
         LEFT JOIN ($term) term   ON term.identity_id = i.identity_id
-        LEFT JOIN ($ssn4) ssn4   ON ssn4.identity_id = i.identity_id
         -- status = 'active' as well as current = 1. Before SCD-2 a merged-away
         -- identity was DELETED, so it could never be materialised; 3a made a merge
         -- retain the row with a final current version saying status = 'merged', and
