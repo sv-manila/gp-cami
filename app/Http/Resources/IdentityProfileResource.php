@@ -6,8 +6,13 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 /**
- * Shapes a gp_identity_profile row for the API. Never exposes ssn_hash or
- * encrypted SSN — ssn_last_four only.
+ * Shapes a gp_identity_profile row for the API.
+ *
+ * It never emitted an SSN or an ssn_hash — that was structural, not a filter, and
+ * it stays structural. ssn_last_four was the one SSN-derived field it did return
+ * and the GPP conformance programme removed it: CAMI is both the system of record
+ * for employees.social_security_num and the only caller, so the hub was handing
+ * back PII the caller already owned, for no information it lacked.
  */
 class IdentityProfileResource extends JsonResource
 {
@@ -20,7 +25,6 @@ class IdentityProfileResource extends JsonResource
             'middle_name' => $this->middle_name,
             'last_name' => $this->last_name,
             'date_of_birth' => optional($this->date_of_birth)->toDateString(),
-            'ssn_last_four' => $this->ssn_last_four,
             'npi' => $this->npi ? (int) $this->npi : null,
             'upin' => $this->upin,
             'dea_number' => $this->dea_number,

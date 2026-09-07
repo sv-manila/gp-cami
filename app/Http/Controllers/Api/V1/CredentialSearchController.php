@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Exceptions\TooManyCredentialLinksException;
 use App\GoldenProfile\Support\CredentialSelector;
-use App\GoldenProfile\Support\SsnHasher;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\CredentialSearchRequest;
 use App\Models\Gp\GpIdentityProfile;
@@ -14,8 +13,6 @@ use Illuminate\Support\Facades\Log;
 
 class CredentialSearchController extends Controller
 {
-    public function __construct(private SsnHasher $ssnHasher) {}
-
     /**
      * POST /api/v1/credential-search
      * Resolve one person, return the latest qualifying credential match plus any
@@ -24,33 +21,27 @@ class CredentialSearchController extends Controller
      */
     public function __invoke(CredentialSearchRequest $request): JsonResponse
     {
-        // A supplied SSN does two separate jobs, and only one of them needs the
-        // shared hash key:
+        // A supplied SSN used to do two separate jobs. Only the second survives
+        // the GPP conformance programme:
         //
-        //   1. narrowing identity resolution, by matching gp_identity_profile
-        //      .ssn_hash — impossible without the key;
+        //   1. narrowing identity resolution, by matching
+        //      gp_identity_profile.ssn_hash — REMOVED with the column, per
+        //      Delivery Checklist §1 ("never store SSN");
         //   2. gating credential matches whose own scrape recorded an SSN, which
-        //      compares against the value in the payload and needs no key at all.
+        //      compares against the value in the source payload and needs no key,
+        //      no hash and no hub write. See latestQualifyingCredential() and
+        //      CredentialSelector::identityAgrees().
         //
-        // Refusing the whole request when the key is missing would disable (2) as
-        // well, and the key is absent in every environment that has not been given
-        // GP_SSN_PLAINTEXT_KEY. So (2) still runs, (1) is skipped, and the response
-        // says so — the point of the original refusal was that a dropped SSN filter
-        // must never be silent, not that it must be fatal.
+        // The controller used to warn when job 1 was unavailable because a
+        // silently-dropped SSN filter would answer 200 with a possibly-different
+        // person's data. There is nothing left to drop silently: job 1 no longer
+        // exists for anyone, so its absence is the documented contract rather than
+        // an environmental accident.
+        //
+        // `warnings` stays in the response shape. Nothing can populate it today,
+        // but it is published, so removing it would be a second breaking change
+        // for no benefit — and a future warning has somewhere to go.
         $warnings = [];
-
-        if ($request->filled('ssn') && ! $this->ssnHasher->available()) {
-            $reason = $this->ssnHasher->unavailableReason() ?? 'unknown';
-            Log::warning('credential-search cannot use the ssn for identity resolution', ['reason' => $reason]);
-
-            $warnings[] = [
-                'code' => 'ssn_not_used_for_identity_resolution',
-                'message' => 'SSN hashing is unavailable on this instance, so the SSN did not narrow '
-                    .'which identity was resolved — it was still used to exclude credential matches '
-                    .'recorded against a different SSN. Configure GP_SSN_PLAINTEXT_KEY to narrow on it.',
-                'reason' => $reason,
-            ];
-        }
 
         $identity = $this->resolveIdentity($request);
 
@@ -72,7 +63,6 @@ class CredentialSearchController extends Controller
                 'identity_uuid' => $identity->identity_uuid,
                 'first_name' => $identity->first_name,
                 'last_name' => $identity->last_name,
-                'ssn_last_four' => $identity->ssn_last_four,
             ],
             'match' => $match,
             'prior_resolution' => $prior,
@@ -97,13 +87,11 @@ class CredentialSearchController extends Controller
             $q->where('date_of_birth', $r->date('dob')->toDateString());
         }
 
-        // Only when a key exists. candidateHashes() returns [] without one, and
-        // whereIn('ssn_hash', []) matches NOTHING — so an unavailable key would
-        // turn every SSN-bearing request into a 404 rather than simply not
-        // narrowing. __invoke() has already recorded the warning for this case.
-        if ($r->filled('ssn') && $this->ssnHasher->available()) {
-            $q->whereIn('ssn_hash', $this->ssnHasher->candidateHashes($r->input('ssn')));
-        }
+        // No ssn narrower. gp_identity_profile has no ssn_hash column to match
+        // against — see __invoke(). A supplied ssn still gates the credential
+        // matches further down, and the multi-identity Log::warning below still
+        // reports whether one was supplied, which is now the honest statement that
+        // a narrower was OFFERED and not used for resolution.
 
         if ($r->filled('license_number')) {
             // Current licence versions only: narrowing on a licence an identity no
@@ -146,13 +134,13 @@ class CredentialSearchController extends Controller
         }
 
         // Only the columns this endpoint actually uses: the response echoes
-        // identity_id/uuid/first_name/last_name/ssn_last_four, and the credential
-        // and prior-resolution lookups key off identity_id. Selecting * here would
+        // identity_id/uuid/first_name/last_name, and the credential and
+        // prior-resolution lookups key off identity_id. Selecting * here would
         // pull the JSON rollups too — identity 3 ("John Smith", 397,170 credential
         // links) carries a 69MB credentials blob and a 38MB exclusions blob, enough
         // to exhaust PHP's memory_limit on the hydrate alone.
         return GpIdentityProfile::query()
-            ->select('identity_id', 'identity_uuid', 'first_name', 'last_name', 'ssn_last_four')
+            ->select('identity_id', 'identity_uuid', 'first_name', 'last_name')
             ->find($matches[0]);
     }
 
