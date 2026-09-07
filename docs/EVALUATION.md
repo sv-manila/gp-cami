@@ -64,6 +64,44 @@ this baseline fails the build even though it would still clear the floors. **Pla
 the canonical order (`00-PROGRAMME.md` §2) plan 2 sees `true_pairs` 11, so its
 own stated `recall → 0.8889 (8/9)` becomes **0.9091 (10/11)**.
 
+## SCD-2 versioning (plan 3a) — the gate did not move
+
+| Metric | Before | After |
+|---|---|---|
+| Precision | 1.0000 | 1.0000 |
+| Recall | 1.0000 | 1.0000 |
+| F1 | 1.0000 | 1.0000 |
+| False merges | 0 | 0 |
+| False splits | 0 | 0 |
+| True pairs | 11 | 11 |
+
+**11, not the 9 plan 3a's own text predicts.** That plan was written against plan
+1's baseline, and under the canonical order (`00-PROGRAMME.md` §2) plan 5 runs
+first and raises `true_pairs` to 11. The identity of the before and after columns
+is the assertion; the value they share comes from whatever ran before.
+
+**That identity is the deliverable, not a footnote.** Plan 3a changed every write
+path in the hub from overwrite to insert-new-version, and added a `current = 1`
+filter to every read of a versioned table. None of that is supposed to alter which
+records group together — the grouping is `gp_source_link`, and no threshold, weight
+or tier moved. A gate that shifted in either direction would mean a read filter is
+wrong:
+
+- a false merge means a tier or Pass B query lost `current = 1` and matched a
+  superseded version;
+- a false split means a query kept `current = 1` but lost `status = 'active'`.
+
+Both directions were observed during execution, which is why the gate is worth
+running after every task rather than once at the end:
+
+| What happened | How the gate showed it |
+|---|---|
+| `Versioner::only()` silently dropped the undeclared `state` column, so MMIS identifiers were written with a NULL state and the state-scoped tier stopped matching | recall fell to 0.9091 with 1 false split |
+| Pass B's candidate query offered a merged identity through its own superseded (still `active`) version | caught by a test, not the gate — the plan's own fixture could not reach the review band, so the gate never saw it |
+
+The ratchet assertions in `EvalGateTest` are therefore **unchanged** by this plan.
+Plan 2, which deliberately removes the `ssn_hash` tier, is the one that has to
+re-baseline them.
 ### Still needs a real hub
 
 | Needed | How | Gates |

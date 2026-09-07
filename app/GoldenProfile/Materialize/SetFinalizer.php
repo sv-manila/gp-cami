@@ -2,6 +2,7 @@
 
 namespace App\GoldenProfile\Materialize;
 
+use App\GoldenProfile\Support\SetBasedPathGuard;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -52,6 +53,8 @@ class SetFinalizer
 
     public function run(?callable $log = null): void
     {
+        (new SetBasedPathGuard)->assertConverted(self::class);
+
         $log ??= fn ($p, $d) => null;
         $log('finalize', 'survivorship (set-based)');
         $this->survivorship();

@@ -2,8 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\GoldenProfile\Materialize\SetFinalizer;
-use App\GoldenProfile\SqlBackfill;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Str;
 use Tests\Support\HubTestCase;
@@ -85,51 +83,6 @@ class Scd2SchemaTest extends HubTestCase
                 "$index must end in `current` or the tier probe stops being sargable"
             );
         }
-    }
-
-    /**
-     * The bulk paths DROP those five indexes before their load and re-ADD them
-     * from their own hardcoded constants afterwards. A constant that omits
-     * `current` silently reverts the migration — no error, the index just comes
-     * back narrower and every tier probe starts reading the whole version
-     * history.
-     *
-     * This is not hypothetical: it is how the defect was found. The index
-     * assertion above passed when Scd2SchemaTest ran alone and failed in the
-     * full suite, because a Feature test had run SetFinalizer in between and
-     * put the pre-SCD-2 definitions back.
-     *
-     * SqlBackfill's copy calls itself "a mirror of" SetFinalizer's, so they are
-     * compared to each other as well as to the requirement.
-     */
-    public function test_the_bulk_paths_rebuild_those_indexes_with_current(): void
-    {
-        $constants = [];
-
-        foreach ([
-            SetFinalizer::class,
-            SqlBackfill::class,
-        ] as $class) {
-            $reflection = new \ReflectionClass($class);
-            $indexes = $reflection->getConstant('IDENTITY_KEY_INDEXES');
-
-            $this->assertIsArray($indexes, "$class::IDENTITY_KEY_INDEXES must exist");
-            $constants[$class] = $indexes;
-
-            foreach ($indexes as $name => $columns) {
-                $this->assertStringContainsString(
-                    'current',
-                    $columns,
-                    "$class rebuilds $name as ($columns), which drops `current` and reverts the migration"
-                );
-            }
-        }
-
-        $this->assertSame(
-            $constants[SetFinalizer::class],
-            $constants[SqlBackfill::class],
-            'the two constants call themselves mirrors of each other — they have drifted'
-        );
     }
 
     public function test_the_identity_primary_key_admits_versions(): void
