@@ -387,6 +387,10 @@ class SetFinalizer
     public function materialize(?callable $progress = null): void
     {
         $hub = $this->hub();
+        // MIN/MAX over every version, deliberately: a superseded version carries
+        // the same identity_id as its successor, so the bounds are identical either
+        // way and adding `current` = 1 here would only cost an index probe per
+        // chunk.
         $b = $hub->selectOne('SELECT MIN(identity_id) lo, MAX(identity_id) hi FROM gp_identity');
         if (! $b || $b->lo === null) {
             return;
@@ -422,36 +426,50 @@ class SetFinalizer
         $r = "identity_id >= $lo AND identity_id < $hi";
         $rL = "l.identity_id >= $lo AND l.identity_id < $hi";
 
+        // The profile is a projection of the CURRENT version of everything, and it
+        // is not itself versioned (a rebuildable read model whose rows reach 100MB
+        // of JSON — docs/SCD2.md). These filters are therefore the only thing
+        // keeping it correct, and a missing one does not throw: it doubles a count
+        // and duplicates a JSON entry.
+        //
+        // gp_board_action and gp_identity_resolution are absent on purpose: the
+        // first is append-only, and the second was already SCD-2 before this
+        // programme and is filtered on its own is_current flag below. So are $src,
+        // $acct, $alias, $term and $ssn4 — they read gp_source_link and stg_person,
+        // neither of which is versioned, so `current` = 1 there would be a fatal
+        // Unknown column (which is the good kind of wrong).
+        $rv = "$r AND `current` = 1";
+
         // Per-identity aggregate CTEs (each one row per identity_id), range-scoped.
         $lic = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('number',license_number,'state',certification_state,
                         'board',certification_board,'type',license_type,'registry',registry,
                         'verified',{$jb('is_verified=1')})) js
-                FROM gp_license WHERE $r GROUP BY identity_id";
+                FROM gp_license WHERE $rv GROUP BY identity_id";
 
         $idt = "SELECT identity_id,
                     COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('type',id_type,'value',id_value)) js,
                     MAX(CASE WHEN id_type='dea' THEN id_value END) dea
-                FROM (SELECT DISTINCT identity_id,id_type,id_value FROM gp_identity_identifier WHERE $r) u
+                FROM (SELECT DISTINCT identity_id,id_type,id_value FROM gp_identity_identifier WHERE $rv) u
                 GROUP BY identity_id";
 
         $addr = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('type', IF(is_primary=1,'primary','alt'),
                         'address1',address1,'address2',address2,'city',city,'state',state,'zip',zip)) js
-                 FROM gp_address WHERE $r GROUP BY identity_id";
+                 FROM gp_address WHERE $rv GROUP BY identity_id";
 
         // primary address scalars: is_primary first, then lowest address_id.
         $prim = "SELECT identity_id, address1, city, state, zip FROM (
                     SELECT identity_id, address1, city, state, zip,
                         ROW_NUMBER() OVER (PARTITION BY identity_id ORDER BY is_primary DESC, address_id ASC) rn
-                    FROM gp_address WHERE $r ) t WHERE rn = 1";
+                    FROM gp_address WHERE $rv ) t WHERE rn = 1";
 
         $cred = "SELECT identity_id, COUNT(*) cnt,
                     JSON_ARRAYAGG(JSON_OBJECT('credential_match_id',credential_match_id,'registry',registry,
                         'status',match_summary_status,'status_code',match_summary_status_code,
                         'valid',{$jb('match_is_valid=1')},'current',{$jb('source_current=1')},'link_state',link_state)) js
-                 FROM gp_identity_credential WHERE $r GROUP BY identity_id";
+                 FROM gp_identity_credential WHERE $rv GROUP BY identity_id";
 
         $excl = "SELECT identity_id, COUNT(*) cnt,
                     MAX(link_state <> 'rejected') act,
@@ -459,7 +477,7 @@ class SetFinalizer
                         'is_ssn_match',{$jb('is_ssn_match=1')},'is_npi_match',{$jb('is_npi_match=1')},
                         'is_canonical_name_match',{$jb('is_canonical_name_match=1')},
                         'is_license_number_match',{$jb('is_license_number_match=1')},'link_state',link_state)) js
-                 FROM gp_identity_exclusion WHERE $r GROUP BY identity_id";
+                 FROM gp_identity_exclusion WHERE $rv GROUP BY identity_id";
 
         $board = "SELECT identity_id, COUNT(*) cnt,
                     MAX(resolution_date IS NULL) act,
@@ -552,7 +570,7 @@ class SetFinalizer
         LEFT JOIN ($alias) alias ON alias.identity_id = i.identity_id
         LEFT JOIN ($term) term   ON term.identity_id = i.identity_id
         LEFT JOIN ($ssn4) ssn4   ON ssn4.identity_id = i.identity_id
-        WHERE i.identity_id >= $lo AND i.identity_id < $hi");
+        WHERE i.identity_id >= $lo AND i.identity_id < $hi AND i.`current` = 1");
 
         return (int) $hub->selectOne("SELECT COUNT(*) c FROM gp_identity_profile WHERE $r")->c;
     }

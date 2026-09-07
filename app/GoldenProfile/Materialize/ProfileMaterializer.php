@@ -63,7 +63,8 @@ class ProfileMaterializer
             ->unique(fn ($a) => $a['type'].'|'.$a['first'].'|'.$a['last'])->values();
 
         $licenses = $hub->table('gp_license')
-            ->where('identity_id', $identityId)->where('current', 1)->get()
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('license_id')->get()
             ->map(fn ($l) => [
                 'number' => $l->license_number, 'state' => $l->certification_state,
                 'board' => $l->certification_board, 'type' => $l->license_type,
@@ -71,14 +72,27 @@ class ProfileMaterializer
             ])->values();
 
         $identifiers = $hub->table('gp_identity_identifier')
-            ->where('identity_id', $identityId)->where('current', 1)->get()
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('id')->get()
             ->map(fn ($r) => ['type' => $r->id_type, 'value' => $r->id_value])
             ->unique(fn ($r) => $r['type'].'|'.$r['value'])->values();
         // Fall back the profile's dea_number column to a DEA identifier for display.
-        $deaFromIdentifier = $identifiers->firstWhere('type', 'dea')['value'] ?? null;
+        // Fall back the profile's dea_number column to a DEA identifier for display.
+        //
+        // max(), not firstWhere(): SetFinalizer's $idt picks
+        // MAX(CASE WHEN id_type='dea' THEN id_value END), so an identity carrying
+        // two DEA identifiers would otherwise get a different fallback from each
+        // path and break the byte-identical-profile invariant.
+        $deaFromIdentifier = $identifiers->where('type', 'dea')->max('value');
 
+        // is_primary first, then lowest address_id — the same order as
+        // SetFinalizer's $prim window function. Without the orderBy this read
+        // returned rows in whatever order the server chose and firstWhere() could
+        // pick a different address than the bulk path did, so the documented
+        // byte-identical-profile invariant held by luck rather than by design.
         $addresses = $hub->table('gp_address')
-            ->where('identity_id', $identityId)->where('current', 1)->get();
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('address_id')->get();
         $primary = $addresses->firstWhere('is_primary', 1) ?? $addresses->first();
         $addressJson = $addresses->map(fn ($a) => [
             'type' => $a->is_primary ? 'primary' : 'alt',
@@ -125,8 +139,14 @@ class ProfileMaterializer
             ])->values();
 
         // terminated flag = latest staged person's flag
+        // terminated flag = latest staged person's flag. The stg_person_id DESC tail
+        // matches SetFinalizer's $term window (source_modified DESC, stg_person_id
+        // DESC); without it two rows with the same source_modified could resolve
+        // differently on the two paths.
         $terminated = $stgIds->isEmpty() ? null : (int) $hub->table('stg_person')
-            ->whereIn('stg_person_id', $stgIds)->orderByDesc('source_modified')->value('terminated');
+            ->whereIn('stg_person_id', $stgIds)
+            ->orderByDesc('source_modified')->orderByDesc('stg_person_id')
+            ->value('terminated');
 
         $now = now();
         $hub->table('gp_identity_profile')->updateOrInsert(
@@ -203,6 +223,14 @@ class ProfileMaterializer
         return $ids->unique()->values();
     }
 
+    /**
+     * Lowest stg_person_id with a non-null ssn_last_four — the same pick as
+     * SetFinalizer's $ssn4 window (ORDER BY stg_person_id ASC). Without the
+     * ordering this returned whichever row the server offered first, so the two
+     * paths could disagree on an identity with more than one staged SSN tail.
+     *
+     * Deleted by plan 2 along with the column.
+     */
     private function ssnLastFour($stgIds): ?string
     {
         if ($stgIds->isEmpty()) {
@@ -210,6 +238,8 @@ class ProfileMaterializer
         }
 
         return $this->hub()->table('stg_person')->whereIn('stg_person_id', $stgIds)
-            ->whereNotNull('ssn_last_four')->value('ssn_last_four');
+            ->whereNotNull('ssn_last_four')
+            ->orderBy('stg_person_id')
+            ->value('ssn_last_four');
     }
 }

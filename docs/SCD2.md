@@ -102,6 +102,40 @@ was written and executed without it. Whoever picks it up should note that changi
 rebuilds the index on every versioned table, and that a sentinel string must be one no real value
 can contain.
 
+## What "byte-identical profile" means after the set-based conversion
+
+`Resolution\Survivorship`'s final tiebreak is pinned to `link_id ASC` to match
+`SetFinalizer`'s SQL "because a mismatch broke the *rebuild produces a
+byte-identical profile* invariant". Plan 3b keeps that invariant and narrows what
+it claims, because read literally it was never available for every column.
+
+| Column group | Status | Why |
+|---|---|---|
+| Every scalar | **byte-identical** | Asserted directly by `SetMaterializeParityTest`. |
+| The ten JSON arrays (`licenses`, `addresses`, `identifiers`, `credentials`, `exclusions`, `board_actions`, `resolutions`, `aliases`, `source_records`, `accounts`) | **multiset-identical** | MySQL 8 has no `ORDER BY` inside `JSON_ARRAYAGG`, so element order is whatever the aggregation saw; the per-row path builds its array in query-return order, which is equally unpinned. The test canonicalises each array (sort by the JSON of each element) before comparing. |
+
+Four scalar picks were order-dependent on the per-row side and pinned on the
+set-based side, so the invariant held by luck rather than by design. Plan 3b Task 4
+added the matching tiebreak to each:
+
+| Pick | Set-based order | Per-row before | Per-row now |
+|---|---|---|---|
+| primary address scalars | `is_primary DESC, address_id ASC` | `firstWhere('is_primary', 1)` over an unordered read | `->orderBy('address_id')` first |
+| `dea_number` fallback | `MAX(CASE WHEN id_type='dea' THEN id_value END)` | `firstWhere('type','dea')` | `->where('type','dea')->max('value')` |
+| `terminated` | `source_modified DESC, stg_person_id DESC` | `orderByDesc('source_modified')` only | both keys |
+| `ssn_last_four` | `stg_person_id ASC` | no ordering at all | `->orderBy('stg_person_id')` |
+
+### Two divergences that are NOT fixed here
+
+- **Which staged row's value wins for a repeated licence or address.** The per-row
+  path is last-observation-wins (`updateOrInsert` per row); the set-based path takes
+  `MAX(...)` over the group. Fixing either would change data, so the parity fixture
+  gives every repeated licence/address identical non-key attributes and the
+  divergence is recorded rather than resolved.
+- **The `backfillIdentityKeys` filler-SSN screen.** `DeterministicResolver::backfillKeys()`
+  skips a blocked `ssn_hash`; the set-based `backfillIdentityKeys()` has no blocklist
+  check at all. Adding it would be a matching change, and plan 2 deletes `ssn_hash`
+  from every one of these paths, so it is **owned by plan 2**.
 ## Migration runbook
 
 Every statement in `2026_09_04_000100_add_scd2_versioning` is `ALGORITHM=INSTANT` or
