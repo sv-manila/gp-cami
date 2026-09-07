@@ -25,7 +25,13 @@ class ProfileMaterializer
     public function rebuild(int $identityId): void
     {
         $hub = $this->hub();
-        $identity = $hub->table('gp_identity')->where('identity_id', $identityId)->first();
+        // The profile is a projection of the CURRENT version of everything. It is
+        // itself unversioned (a rebuildable read model whose rows reach 100MB of
+        // JSON — see docs/SCD2.md), which makes these filters the only thing
+        // keeping it correct. A missing one does not throw: it doubles a count and
+        // duplicates a JSON entry.
+        $identity = $hub->table('gp_identity')
+            ->where('identity_id', $identityId)->where('current', 1)->first();
         if (! $identity) {
             return;
         }
@@ -56,20 +62,37 @@ class ProfileMaterializer
             ->map(fn ($a) => ['type' => $a->alias_type, 'first' => $a->first_name, 'last' => $a->last_name])
             ->unique(fn ($a) => $a['type'].'|'.$a['first'].'|'.$a['last'])->values();
 
-        $licenses = $hub->table('gp_license')->where('identity_id', $identityId)->get()
+        $licenses = $hub->table('gp_license')
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('license_id')->get()
             ->map(fn ($l) => [
                 'number' => $l->license_number, 'state' => $l->certification_state,
                 'board' => $l->certification_board, 'type' => $l->license_type,
                 'registry' => $l->registry, 'verified' => (bool) $l->is_verified,
             ])->values();
 
-        $identifiers = $hub->table('gp_identity_identifier')->where('identity_id', $identityId)->get()
+        $identifiers = $hub->table('gp_identity_identifier')
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('id')->get()
             ->map(fn ($r) => ['type' => $r->id_type, 'value' => $r->id_value])
             ->unique(fn ($r) => $r['type'].'|'.$r['value'])->values();
         // Fall back the profile's dea_number column to a DEA identifier for display.
-        $deaFromIdentifier = $identifiers->firstWhere('type', 'dea')['value'] ?? null;
+        // Fall back the profile's dea_number column to a DEA identifier for display.
+        //
+        // max(), not firstWhere(): SetFinalizer's $idt picks
+        // MAX(CASE WHEN id_type='dea' THEN id_value END), so an identity carrying
+        // two DEA identifiers would otherwise get a different fallback from each
+        // path and break the byte-identical-profile invariant.
+        $deaFromIdentifier = $identifiers->where('type', 'dea')->max('value');
 
-        $addresses = $hub->table('gp_address')->where('identity_id', $identityId)->get();
+        // is_primary first, then lowest address_id — the same order as
+        // SetFinalizer's $prim window function. Without the orderBy this read
+        // returned rows in whatever order the server chose and firstWhere() could
+        // pick a different address than the bulk path did, so the documented
+        // byte-identical-profile invariant held by luck rather than by design.
+        $addresses = $hub->table('gp_address')
+            ->where('identity_id', $identityId)->where('current', 1)
+            ->orderBy('address_id')->get();
         $primary = $addresses->firstWhere('is_primary', 1) ?? $addresses->first();
         $addressJson = $addresses->map(fn ($a) => [
             'type' => $a->is_primary ? 'primary' : 'alt',
@@ -77,15 +100,20 @@ class ProfileMaterializer
             'city' => $a->city, 'state' => $a->state, 'zip' => $a->zip,
         ])->values();
 
-        $credentials = $hub->table('gp_identity_credential')->where('identity_id', $identityId)->get()
+        $credentials = $hub->table('gp_identity_credential')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($c) => [
                 'credential_match_id' => (int) $c->credential_match_id, 'registry' => $c->registry,
                 'status' => $c->match_summary_status, 'status_code' => $c->match_summary_status_code,
-                'valid' => (bool) $c->match_is_valid, 'current' => (bool) $c->current,
+                // The JSON key stays `current` (published response shape); the
+                // column behind it is source_current — CAMI's flag, not the
+                // version flag.
+                'valid' => (bool) $c->match_is_valid, 'current' => (bool) $c->source_current,
                 'link_state' => $c->link_state,
             ])->values();
 
-        $exclusions = $hub->table('gp_identity_exclusion')->where('identity_id', $identityId)->get()
+        $exclusions = $hub->table('gp_identity_exclusion')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($e) => [
                 'match_id' => (int) $e->match_id, 'registry' => $e->registry,
                 'is_ssn_match' => (bool) $e->is_ssn_match, 'is_npi_match' => (bool) $e->is_npi_match,
@@ -111,8 +139,14 @@ class ProfileMaterializer
             ])->values();
 
         // terminated flag = latest staged person's flag
+        // terminated flag = latest staged person's flag. The stg_person_id DESC tail
+        // matches SetFinalizer's $term window (source_modified DESC, stg_person_id
+        // DESC); without it two rows with the same source_modified could resolve
+        // differently on the two paths.
         $terminated = $stgIds->isEmpty() ? null : (int) $hub->table('stg_person')
-            ->whereIn('stg_person_id', $stgIds)->orderByDesc('source_modified')->value('terminated');
+            ->whereIn('stg_person_id', $stgIds)
+            ->orderByDesc('source_modified')->orderByDesc('stg_person_id')
+            ->value('terminated');
 
         $now = now();
         $hub->table('gp_identity_profile')->updateOrInsert(
@@ -124,8 +158,6 @@ class ProfileMaterializer
                 'last_name' => $identity->canonical_last,
                 'suffix' => $identity->canonical_suffix ?? null,
                 'date_of_birth' => $identity->canonical_dob,
-                'ssn_hash' => $identity->ssn_hash,
-                'ssn_last_four' => $this->ssnLastFour($stgIds),
                 'npi' => $identity->npi,
                 'upin' => $identity->upin,
                 'dea_number' => $identity->dea_number ?: $deaFromIdentifier,
@@ -187,15 +219,5 @@ class ProfileMaterializer
         }
 
         return $ids->unique()->values();
-    }
-
-    private function ssnLastFour($stgIds): ?string
-    {
-        if ($stgIds->isEmpty()) {
-            return null;
-        }
-
-        return $this->hub()->table('stg_person')->whereIn('stg_person_id', $stgIds)
-            ->whereNotNull('ssn_last_four')->value('ssn_last_four');
     }
 }

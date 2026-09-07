@@ -11,7 +11,10 @@ use Illuminate\Support\Collection;
  *
  *     ... LEFT JOIN <src>.credential_matches cm ON cm.id = gc.credential_match_id
  *     WHERE (cm.expiry_date IS NULL OR cm.expiry_date >= CURDATE())
- *     ORDER BY gc.current DESC, COALESCE(cm.date_updated, cm.date_created) DESC
+ *     ORDER BY gc.source_current DESC, COALESCE(cm.date_updated, cm.date_created) DESC
+ *
+ * (that column was `gc.current` until the SCD-2 work freed the name for the
+ * version flag; it is CAMI's own currency flag and always was)
  *
  * but the hub and the CAMI source are separate MySQL servers, so qualifying
  * credential_matches with the source schema raised "1049 Unknown database" and
@@ -37,7 +40,8 @@ class CredentialSelector
 {
     /**
      * @param  Collection<int,object>  $links  hub rows, each with credential_match_id,
-     *                                         current, and the source dates attached
+     *                                         source_current, and the source dates
+     *                                         attached
      * @param  bool  $respectExpiry  mirrors golden_profile.credential_search.respect_expiry_date
      * @param  string  $today  CURDATE() equivalent, as Y-m-d
      */
@@ -173,8 +177,13 @@ class CredentialSelector
                 || self::blank($l->expiry_date ?? null)
                 || self::dateOnly($l->expiry_date) >= $today)
             ->sortBy([
-                // current DESC
-                fn ($a, $b) => (int) ($b->current ?? 0) <=> (int) ($a->current ?? 0),
+                // source_current DESC — CAMI's currency flag, NOT the SCD-2
+                // version flag. Reading `current` here would be silently wrong
+                // twice over: absent right after the rename (?? 0 turns the key
+                // into a constant and the ranking degrades to date order), then
+                // present again as the version flag, which is 1 for every live
+                // row and so equally useless as a discriminator.
+                fn ($a, $b) => (int) ($b->source_current ?? 0) <=> (int) ($a->source_current ?? 0),
                 // COALESCE(date_updated, date_created) DESC
                 fn ($a, $b) => strcmp(self::effectiveDate($b), self::effectiveDate($a)),
                 // credential_match_id ASC — the old SQL had no third key, so a full

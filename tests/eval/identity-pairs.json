@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* pair is a KNOWN, ACCEPTED FALSE SPLIT and must never be deleted. It was bound solely by the ssn_hash tier, which the GPP conformance programme removed (Delivery Checklist §1: the hub never stores an SSN), so the matcher can no longer find it — recall is 10/11 by design and EvalGateTest ratchets on exactly that. Deleting the pair would restore a perfect score for a matcher that is measurably worse, which is what the `true_pairs >= 11` assertion exists to catch; EvalSetShapeTest asserts both refs are still present in one cluster. The ssn_hash value is kept on the records as documentation of what the retired tier matched on — a synthetic sha512 of the literal string gp-cami-eval-fixture-synthetic-ssn-grace-adeyemi, deliberately NOT a filler value — but EvalRunner stops staging it once Task 7 drops the column. The nodob-a/nodob-b pair (same name, no DOB on either record) is kept apart in `truth` as a deliberate POLICY assertion — never merge on name alone without a DOB, no matter how suggestive the name match looks — not a conclusion drawn from the available evidence, so nobody should later 'correct' the answer key to merge them.",
+  "records": [
+    { "ref": "smith-a", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": 1234567893 },
+    { "ref": "smith-b", "first_name": "Bob", "last_name": "Smith", "date_of_birth": null, "npi": 1234567893 },
+    { "ref": "smith-c", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": null },
+    { "ref": "smith-other", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1991-12-18", "npi": 1987654328 },
+
+    { "ref": "garcia-a", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1975-01-09", "npi": 1999999992 },
+    { "ref": "garcia-b", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1975-01-09", "npi": null },
+    { "ref": "garcia-other", "first_name": "Maria", "last_name": "Garcia", "date_of_birth": "1988-06-30", "npi": null },
+
+    { "ref": "kowalski-a", "first_name": "Ann", "last_name": "Kowalski", "date_of_birth": "1981-03-03", "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "NY" }] },
+    { "ref": "kowalski-b", "first_name": "Anne", "last_name": "Kowalski", "date_of_birth": null, "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "NY" }] },
+    { "ref": "kowalski-other", "first_name": "Ann", "last_name": "Kowalski", "date_of_birth": "1990-11-11", "npi": null,
+      "licenses": [{ "license_number": "L-77", "certification_state": "CA" }] },
+
+    { "ref": "chain-a", "first_name": "Peter", "last_name": "Nguyen", "date_of_birth": "1968-07-21", "npi": 1112223338 },
+    { "ref": "chain-b", "first_name": "Peter", "last_name": "Nguyen", "date_of_birth": "1968-07-21", "npi": null,
+      "licenses": [{ "license_number": "PN-3312", "certification_state": "TX" }] },
+    { "ref": "chain-c", "first_name": "Pete", "last_name": "Nguyen", "date_of_birth": null, "npi": null,
+      "licenses": [{ "license_number": "PN-3312", "certification_state": "TX" }] },
+
+    { "ref": "nodob-a", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
+    { "ref": "nodob-b", "first_name": "Sarah", "last_name": "Okafor", "date_of_birth": null, "npi": null },
+
+    { "ref": "ssn-a", "first_name": "Grace", "last_name": "Adeyemi", "date_of_birth": "1979-05-14", "npi": null,
+      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" },
+    { "ref": "ssn-b", "first_name": "Gracie", "last_name": "Adeyemi", "date_of_birth": null, "npi": null,
+      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" },
+
+    { "ref": "mmis-a", "first_name": "Linda", "last_name": "Park", "date_of_birth": "1985-02-20", "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "CA" }] },
+    { "ref": "mmis-b", "first_name": "Lynda", "last_name": "Park", "date_of_birth": null, "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "CA" }] },
+    { "ref": "mmis-other-state", "first_name": "Linda", "last_name": "Park", "date_of_birth": "1991-08-02", "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "TX" }] },
+
+    { "ref": "dea-a", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": "1977-09-09", "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH1234563" }] },
+    { "ref": "dea-b", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": null, "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH1234563" }] },
+    { "ref": "dea-other", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": "2001-05-05", "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH9998887" }] }
+  ],
+  "truth": [
+    ["smith-a", "smith-b", "smith-c"],
+    ["smith-other"],
+    ["garcia-a", "garcia-b"],
+    ["garcia-other"],
+    ["kowalski-a", "kowalski-b"],
+    ["kowalski-other"],
+    ["chain-a", "chain-b", "chain-c"],
+    ["nodob-a"],
+    ["nodob-b"],
+    ["ssn-a", "ssn-b"],
+    ["mmis-a", "mmis-b"],
+    ["mmis-other-state"],
+    ["dea-a", "dea-b"],
+    ["dea-other"]
+  ]
+}

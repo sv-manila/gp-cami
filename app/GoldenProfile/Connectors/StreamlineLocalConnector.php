@@ -2,6 +2,9 @@
 
 namespace App\GoldenProfile\Connectors;
 
+use App\GoldenProfile\Support\NpiValidator;
+use App\GoldenProfile\Support\QuarantineRecorder;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -50,7 +53,17 @@ class StreamlineLocalConnector
                     ->where('id', $emp->employeelist_id)->value('account_id');
         }
 
+        // Format-valid means "10 digits with a correct NPPES check digit" — see
+        // NpiValidator. A value that fails this is nulled here, not just skipped
+        // by a caller, so every downstream consumer (both resolvers, both
+        // ingestion paths, since they all share this one method) sees the same
+        // fact: stg_person.npi is either a validated NPI or nothing. Rejecting a
+        // value that a PRIOR load accepted can split an identity that currently
+        // merges on it — see gp:npi-audit for measuring that against a real hub,
+        // since the eval fixture cannot exercise this (Task 2's fix confirmed
+        // neither corrected NPI is shared between records).
         $npi = (int) ($emp->npi ?? 0);
+        $npiValid = $npi > 0 && NpiValidator::isValid((string) $npi);
 
         return [
             'system_id' => $this->systemId,
@@ -58,13 +71,17 @@ class StreamlineLocalConnector
             'source_id' => $emp->id,
             'account_id' => $accountId ?: null,
             'employeelist_id' => $emp->employeelist_id ?: null,
-            'first_name' => $this->clean($emp->first_name),
-            'middle_name' => $this->clean($emp->middle_name),
-            'last_name' => $this->clean($emp->last_name),
+            'first_name' => $this->cleanName($emp->first_name),
+            'middle_name' => $this->cleanName($emp->middle_name),
+            'last_name' => $this->cleanName($emp->last_name),
             'date_of_birth' => $this->date($emp->date_of_birth),
-            'ssn_hash' => $emp->ssn_hash ?: null,          // ingest as-is (global key)
-            'ssn_last_four' => $emp->ssn_last_four ?: null,
-            'npi' => $npi > 0 ? $npi : null,
+            // No ssn_hash / ssn_last_four. This mapping is the boundary at which
+            // gp-cami stops reading SSN-derived data from streamline_local
+            // entirely — Delivery Checklist §1, "stream internal verified data via
+            // CDC (never store SSN)". The source columns still exist; the hub
+            // simply never selects them. stage() does `select *`, so nothing else
+            // needs changing to make that true.
+            'npi' => $npiValid ? $npi : null,
             'upin' => $emp->upin ?: null,
             'dea_number' => null,                          // not present in this source
             'address1' => $this->clean($emp->address1),
@@ -78,9 +95,41 @@ class StreamlineLocalConnector
         ];
     }
 
-    public function ingest(object $emp, ?array $accountMap = null): int
+    /**
+     * $aiRows lets a caller supply this employee's employee_additional_info
+     * rows instead of paying for a per-row source query, exactly as
+     * $accountMap already does for the employeelists lookup. It also makes the
+     * per-row path testable: phpunit.xml points SRC_DB_* at a dead socket on
+     * purpose, so before this parameter existed no test could drive ingest()
+     * past the additional-info fetch at all.
+     */
+    public function ingest(object $emp, ?array $accountMap = null, ?iterable $aiRows = null): ?int
     {
         $row = $this->personRow($emp, $accountMap);
+        $children = $this->childRows($emp);
+
+        // Pivoted BEFORE the quarantine gate, not inside rebuildChildren()
+        // afterwards. The gate has to see this employee's DEA/MMIS identifiers
+        // and additional-info licences to judge whether the row carries
+        // anything resolvable — those are the row's only identifying data in
+        // exactly the case plan 5 promotes DEA and MMIS into match keys for.
+        $extra = $this->additionalRows($aiRows ?? $this->additionalInfoRows($emp), $emp->state ?? null);
+
+        // A row with no name, no valid npi, no ssn hash, no dea/mmis and no
+        // licence — all judged AFTER junk-cleaning — carries nothing any
+        // resolver can act on. Staging it mints a meaningless residual identity
+        // that lives forever, so it goes to gp_quarantine instead. Returns
+        // null: callers must not resolve a row that was never staged.
+        $reason = (new QuarantineRecorder)->evaluate(
+            $row,
+            array_merge($children['licenses'], $extra['licenses']),
+            $extra['identifiers'],
+        );
+        if ($reason !== null) {
+            (new QuarantineRecorder)->record($this->systemId, self::SOURCE_TABLE, (int) $emp->id, $reason);
+
+            return null;
+        }
 
         // Select-first instead of updateOrInsert: on a fresh load the common
         // path is a brand-new row, and knowing it's new lets us skip the three
@@ -95,26 +144,45 @@ class StreamlineLocalConnector
             $this->hub()->table('stg_person')->where($key)->update($row);
         }
 
-        $this->rebuildChildren($stgId, $emp, $isNew);
+        $this->rebuildChildren($stgId, $emp, $isNew, $children, $extra);
 
         return $stgId;
     }
 
     /** Rebuild the flattened alias/address/license children for a staged person. */
-    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false): void
+    private function rebuildChildren(int $stgId, object $emp, bool $isNew = false, ?array $children = null, ?array $extra = null): void
     {
         $hub = $this->hub();
         // A freshly inserted staged person has no children yet — skip the
-        // three (empty) deletes that dominate the fresh-load per-row cost.
+        // four (empty) deletes that dominate the fresh-load per-row cost.
         if (! $isNew) {
             $hub->table('stg_person_alias')->where('stg_person_id', $stgId)->delete();
             $hub->table('stg_person_address')->where('stg_person_id', $stgId)->delete();
             $hub->table('stg_person_license')->where('stg_person_id', $stgId)->delete();
+            $hub->table('stg_person_identifier')->where('stg_person_id', $stgId)->delete();
         }
 
-        $c = $this->childRows($emp);
-        foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses', 'stg_person_license' => 'licenses'] as $table => $bucket) {
-            if ($c[$bucket]) {
+        // ingest() has already computed these to run the quarantine gate;
+        // reuse them rather than paying for childRows() a second time per row.
+        $c = $children ?? $this->childRows($emp);
+
+        // employee_additional_info (DEA/MMIS + extra licenses/aliases). The
+        // set-based backfill (SqlBackfill::stage()) has always fetched this per
+        // chunk; the per-row path never did, so DEA/MMIS identifiers were
+        // silently invisible to gp:sync and Engine::backfill() until this fix —
+        // which makes promoting them to a real-time resolver tier (Task 9)
+        // meaningless on that path without it.
+        //
+        // ingest() already pivoted these to run the quarantine gate and passes
+        // them in; the fallback is here only for a direct caller.
+        $extra ??= $this->additionalRows($this->additionalInfoRows($emp), $emp->state ?? null);
+        $c['aliases'] = array_merge($c['aliases'], $extra['aliases']);
+        $c['licenses'] = array_merge($c['licenses'], $extra['licenses']);
+        $c['identifiers'] = $extra['identifiers'];
+
+        foreach (['stg_person_alias' => 'aliases', 'stg_person_address' => 'addresses',
+            'stg_person_license' => 'licenses', 'stg_person_identifier' => 'identifiers'] as $table => $bucket) {
+            if ($c[$bucket] ?? null) {
                 $hub->table($table)->insert(array_map(
                     fn ($r) => $r + ['stg_person_id' => $stgId], $c[$bucket]
                 ));
@@ -131,8 +199,8 @@ class StreamlineLocalConnector
     {
         $aliases = [];
         $addAlias = function ($type, $first, $last) use (&$aliases) {
-            $first = $this->clean($first);
-            $last = $this->clean($last);
+            $first = $this->cleanName($first);
+            $last = $this->cleanName($last);
             if ($first || $last) {
                 $aliases[] = ['alias_type' => $type, 'first_name' => $first, 'last_name' => $last];
             }
@@ -190,11 +258,16 @@ class StreamlineLocalConnector
      * into: multi-valued identifiers (DEA, MMIS — match keys), extra licenses
      * (CSL + alt cert/csl licenses), and business-name aliases.
      *
+     * $state is the employee's own state (personRow()'s already-cleaned
+     * value), attached to MMIS identifiers only — DEA registration is federal.
+     *
      * @param  iterable  $aiRows  rows with ->name / ->value (or [name][value])
+     * @param  string|null  $state  the employee's state, for state-scoped identifiers
      * @return array{identifiers:array,licenses:array,aliases:array}
      */
-    public function additionalRows(iterable $aiRows): array
+    public function additionalRows(iterable $aiRows, ?string $state = null): array
     {
+        $state = $this->clean($state);
         $v = [];
         foreach ($aiRows as $r) {
             $name = is_array($r) ? ($r['name'] ?? null) : ($r->name ?? null);
@@ -205,17 +278,27 @@ class StreamlineLocalConnector
             }
         }
 
+        // Every identifier row carries the SAME key set, state included, even
+        // where state is meaningless. Both staging paths insert these as one
+        // multi-row statement and Laravel takes the column list from the first
+        // row only, then binds array_values() of each subsequent row against
+        // it — so a DEA row missing the key and an MMIS row carrying it fails
+        // outright with "SQLSTATE[21S01] Column count doesn't match value
+        // count at row 2". Measured. An employee holding both a DEA and an
+        // MMIS number is not rare, so the shapes must not diverge.
         $identifiers = [];
-        // DEA (match key) — primary + alt + per-alt-license DEAs.
+        // DEA (match key, federal — never state-scoped, so state stays null).
         foreach (['dea_number', 'alt_dea_number', 'alt_license_dea_number_2', 'alt_license_dea_number_3',
             'alt_license_dea_number_4', 'alt_license_dea_number_5', 'alt_license_dea_number_6'] as $k) {
             if (! empty($v[$k])) {
-                $identifiers[] = ['id_type' => 'dea', 'id_value' => $v[$k]];
+                $identifiers[] = ['id_type' => 'dea', 'id_value' => $v[$k], 'state' => null];
             }
         }
-        // MMIS (match key).
+        // MMIS (match key, state-scoped — see this plan's Task 8 for why
+        // "(state, medicaid id)" and "(state, provider#)" both resolve to this
+        // one field in streamline_local).
         if (! empty($v['mmis_number'])) {
-            $identifiers[] = ['id_type' => 'mmis', 'id_value' => $v['mmis_number']];
+            $identifiers[] = ['id_type' => 'mmis', 'id_value' => $v['mmis_number'], 'state' => $state];
         }
 
         $licenses = [];
@@ -262,11 +345,45 @@ class StreamlineLocalConnector
         return soundex($last).'|'.$year;
     }
 
+    /**
+     * This employee's employee_additional_info rows. One source query per
+     * ingested row, mirroring what SqlBackfill::stage() already does per chunk,
+     * just unbatched — ingest() is not on a hot bulk path (that is stage()'s
+     * job), only on gp:sync's incremental, already-per-row loop, so this does
+     * not change its performance character.
+     */
+    private function additionalInfoRows(object $emp): iterable
+    {
+        return $this->src()->table('employee_additional_info')
+            ->where('employee_id', $emp->id)->where('value', '<>', '')
+            ->get(['name', 'value']);
+    }
+
     private function clean(?string $v): ?string
     {
         $v = is_string($v) ? trim($v) : $v;
 
         return ($v === '' || $v === null) ? null : $v;
+    }
+
+    /**
+     * clean() trims and nulls empty strings for every text column; this is the
+     * narrower, name-specific half of junk screening (Delivery Checklist:
+     * "all-zero NPI, 'INFORMATION NOT AVAILABLE'"). Kept separate from clean()
+     * on purpose — a value like "UNKNOWN" is unambiguous junk in a name field
+     * but not necessarily in every other column, so this is applied only where
+     * this plan has confirmed it belongs: first/middle/last name and
+     * name-shaped alias fields.
+     */
+    private function cleanName(?string $v): ?string
+    {
+        $v = $this->clean($v);
+        if ($v === null) {
+            return null;
+        }
+        $placeholders = array_map('strtoupper', (array) config('golden_profile.junk.name_placeholders', []));
+
+        return in_array(strtoupper($v), $placeholders, true) ? null : $v;
     }
 
     private function date(?string $v, bool $withTime = false): ?string
@@ -275,7 +392,7 @@ class StreamlineLocalConnector
             return null;
         }
         try {
-            $c = \Illuminate\Support\Carbon::parse($v);
+            $c = Carbon::parse($v);
 
             return $withTime ? $c->toDateTimeString() : $c->toDateString();
         } catch (\Throwable) {

@@ -2,6 +2,7 @@
 
 namespace Tests\Unit;
 
+use App\Http\Requests\IdentitySearchRequest;
 use Tests\TestCase;
 
 /**
@@ -39,7 +40,7 @@ class AliasIndexConfigTest extends TestCase
 
     public function test_per_page_is_capped_so_a_page_cannot_be_unbounded(): void
     {
-        $rules = (new \App\Http\Requests\IdentitySearchRequest)->rules();
+        $rules = (new IdentitySearchRequest)->rules();
 
         // per_page x max_json_bytes is the worst-case page footprint, so an
         // uncapped per_page reintroduces the same failure by another route.

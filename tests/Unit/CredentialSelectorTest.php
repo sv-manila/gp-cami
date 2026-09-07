@@ -22,7 +22,7 @@ class CredentialSelectorTest extends TestCase
     {
         return (object) [
             'credential_match_id' => $id,
-            'current' => $current,
+            'source_current' => $current,
             'date_updated' => $updated,
             'date_created' => $created,
             'expiry_date' => $expiry,

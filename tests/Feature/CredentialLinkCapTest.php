@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Exceptions\TooManyCredentialLinksException;
+use Illuminate\Contracts\Debug\ExceptionHandler;
 use Tests\TestCase;
 
 /**
@@ -19,7 +20,7 @@ class CredentialLinkCapTest extends TestCase
 {
     public function test_exception_is_rendered_as_409_by_the_exception_handler(): void
     {
-        $handler = app(\Illuminate\Contracts\Debug\ExceptionHandler::class);
+        $handler = app(ExceptionHandler::class);
 
         $response = $handler->render(
             request()->instance(),
@@ -35,10 +36,16 @@ class CredentialLinkCapTest extends TestCase
 
     public function test_409_is_distinguishable_from_every_other_outcome_of_this_endpoint(): void
     {
-        // credential-search has four distinct outcomes and a caller has to be able
+        // credential-search has three distinct outcomes and a caller has to be able
         // to tell them apart: 200 (resolved, match possibly null), 404 (no identity
-        // resolved), 503 (SSN matching unavailable), 409 (link cap). If any two
-        // collide, an integration cannot react correctly.
+        // resolved), 409 (link cap). If any two collide, an integration cannot
+        // react correctly.
+        //
+        // A 503 used to be listed here, from when a missing SSN hash key refused
+        // the whole request. That became a 200-with-warning and then, with the SSN
+        // removal, nothing at all — there is no key to be missing. 503 is kept in
+        // the exclusion list anyway: it is the status a proxy or a downed source
+        // connection produces, and 409 must not be confused with it either.
         $capStatus = (new TooManyCredentialLinksException(1, 1))->render()->getStatusCode();
 
         $this->assertNotContains($capStatus, [200, 404, 503]);
