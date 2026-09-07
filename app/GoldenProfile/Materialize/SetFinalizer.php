@@ -3,6 +3,7 @@
 namespace App\GoldenProfile\Materialize;
 
 use App\GoldenProfile\Support\SetBasedPathGuard;
+use App\GoldenProfile\Support\SetVersionWriter;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -66,13 +67,47 @@ class SetFinalizer
 
     /**
      * Per-field winner = highest field_authority (by source system_code), then
-     * newest source_modified. Mirrors Resolution\Survivorship exactly, but as
-     * one pass per field over every identity instead of per identity.
+     * newest source_modified, then link_id ASC. Mirrors Resolution\Survivorship
+     * exactly, but as one pass over every identity instead of per identity.
+     *
+     * WHY THIS IS ONE ALL-FIELDS PASS AND NOT NINE
+     * -------------------------------------------
+     * It used to be nine independent statements: for each canonical field, one
+     * UPDATE gp_identity SET <field> = <winner>. Under SCD-2 not one of them can
+     * mint a version without minting up to NINE per identity per run — and
+     * Engine::finalizeAll() recomputes every identity, so that is up to ~120M
+     * gp_identity rows on a hub of 13.38M identities. So the nine winners are
+     * pivoted into ONE row per identity, compared against the current version as a
+     * whole, and written as a single version for the identities that actually
+     * differ. Versioner::write() makes the same decision per row; the two have to
+     * reach the same verdict, which is what Support\VersionerSql is for.
+     *
+     * WHAT THE THREE CATEGORIES BECOME HERE
+     * -------------------------------------
+     *   attributes  the nine canonical fields. A field with no non-blank candidate
+     *               is ABSENT, not NULL — it carries the previous version's value
+     *               forward, exactly as ->update($update) used to leave it alone.
+     *               VersionerSql::differsOnPresent() models that.
+     *   derived     record_count. Written onto the current version IN PLACE and
+     *               never a reason to version: gp_source_link already records when
+     *               each link was made with better resolution than a version row
+     *               would, and versioning on a bump would add one identity row per
+     *               source row (~13.4M on a backfill).
+     *   last_updated  no longer written unconditionally. This method used to set it
+     *               to NOW() on every finalize, so it answered "when did we last
+     *               look"; SetVersionWriter stamps it only on a version that is
+     *               actually written, so it now answers "when did the golden facts
+     *               last change". That is the doc's date_updated meaning and it is
+     *               a visible change in both API endpoints — see docs/SCD2.md.
+     *
+     * gp_attribute and gp_survivorship_audit are NOT versioned and are unchanged in
+     * content: they are per-observation provenance, i.e. they ARE the history, so
+     * they do not have one. Both are still fully rebuilt each pass for these nine
+     * attribute names, which is what keeps them idempotent.
      */
     public function survivorship(): void
     {
         $hub = $this->hub();
-        $rank = $this->authorityRankSql('ss');           // authority CASE over gp_source_system alias ss
         $names = array_keys(self::IDENTITY_FIELDS);
         $nameList = "'".implode("','", $names)."'";
 
@@ -80,69 +115,134 @@ class SetFinalizer
         $hub->statement("DELETE FROM gp_attribute WHERE attr_name IN ($nameList)");
         $hub->statement("DELETE FROM gp_survivorship_audit WHERE attribute_name IN ($nameList)");
 
-        // The canonical UPDATEs below rewrite indexed columns (ssn_hash, npi,
-        // upin, dea_number, and canonical_last/first/dob via idx_name_dob) across
-        // every identity, so each would maintain a secondary index row-by-row over
-        // ~13M rows — the survivorship bottleneck. Drop the key indexes first and
-        // rebuild once at the end (same trick resolveDeterministic uses for the
-        // residual insert). dedup already ran (it needed them); nothing between
-        // here and the rebuild needs them.
-        $this->withoutIdentityKeyIndexes(function () use ($hub, $rank) {
-            $this->survivorshipBody($hub, $rank);
+        $this->withoutIdentityKeyIndexes(function () {
+            $this->buildWinners();
+
+            // One version per changed identity; record_count in place for the rest.
+            (new SetVersionWriter)->writeIdentities(
+                'tmp_surv_winner',
+                array_keys(self::IDENTITY_FIELDS),
+                ['record_count' => 'p.`c`'],
+            );
         });
+
+        $this->dropWinnerTables();
     }
 
     /**
-     * The per-field canonical pass, extracted so withoutIdentityKeyIndexes() can
-     * wrap it. Task 3 replaces this whole body with one all-fields versioned pass.
+     * Ranked candidates for one staged column: non-blank values, best authority
+     * then newest, link_id as a deterministic final tiebreak.
+     *
+     * The link_id ASC tail is not cosmetic. Resolution\Survivorship's comparator
+     * ends in the same tiebreak specifically to match this ordering, "because a
+     * mismatch broke the rebuild-produces-a-byte-identical-profile invariant". Two
+     * candidates tied on authority and recency must crown the same winner on both
+     * paths or the two mint different versions from identical input.
      */
-    private function survivorshipBody($hub, $rank): void
+    private function rankedCandidatesSql(string $srcCol): string
     {
-        foreach (self::IDENTITY_FIELDS as $canonical => $srcCol) {
-            // Ranked candidates for this field: non-blank staged values, best
-            // authority then newest, link_id as a deterministic final tiebreak.
-            $ranked = "
-                SELECT l.identity_id, l.link_id, l.system_id, ss.system_code,
-                       sp.`$srcCol` AS v,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY l.identity_id
-                           ORDER BY ($rank) ASC, sp.source_modified DESC, l.link_id ASC
-                       ) rn
-                FROM gp_source_link l
-                JOIN stg_person sp
-                  ON sp.system_id = l.system_id AND sp.source_table = l.source_table AND sp.source_id = l.source_id
-                JOIN gp_source_system ss ON ss.system_id = l.system_id
-                WHERE sp.`$srcCol` IS NOT NULL AND TRIM(sp.`$srcCol`) <> ''";
+        $rank = $this->authorityRankSql('ss');
 
-            // canonical winner -> gp_identity
+        return "
+            SELECT l.identity_id, l.link_id, l.system_id, ss.system_code,
+                   sp.`$srcCol` AS v,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY l.identity_id
+                       ORDER BY ($rank) ASC, sp.source_modified DESC, l.link_id ASC
+                   ) rn
+            FROM gp_source_link l
+            JOIN stg_person sp
+              ON sp.system_id = l.system_id AND sp.source_table = l.source_table AND sp.source_id = l.source_id
+            JOIN gp_source_system ss ON ss.system_id = l.system_id
+            WHERE sp.`$srcCol` IS NOT NULL AND TRIM(sp.`$srcCol`) <> ''";
+    }
+
+    /**
+     * Build tmp_surv_field (winner per identity per field) and tmp_surv_winner (one
+     * pivoted row per identity, plus its record_count), and rewrite provenance.
+     *
+     * TEMPORARY tables on purpose, twice over: CREATE/DROP TEMPORARY TABLE are the
+     * exemptions to MySQL's implicit-commit-on-DDL rule, so this is legal inside a
+     * caller's transaction, and they are per-session so two concurrent runs cannot
+     * collide on them. They are dropped before creation as well as after, because a
+     * temporary table created inside a transaction is not rolled back with it.
+     *
+     * COST, relative to what this replaces. Before: 27 evaluations of the ranked
+     * window function (three statements per field) plus nine 13M-row UPDATEs of
+     * indexed columns. After: 18 evaluations (two per field), one pivot, one audit
+     * insert, and two gp_identity statements RESTRICTED TO THE IDENTITIES THAT
+     * CHANGED — near zero on a steady-state re-finalize.
+     */
+    private function buildWinners(): void
+    {
+        $hub = $this->hub();
+
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_surv_field');
+        $hub->statement('CREATE TEMPORARY TABLE tmp_surv_field (
+            identity_id BIGINT UNSIGNED   NOT NULL,
+            attr_name   VARCHAR(64)       NOT NULL,
+            v           VARCHAR(500)      NULL,
+            link_id     BIGINT UNSIGNED   NOT NULL,
+            system_id   SMALLINT UNSIGNED NOT NULL,
+            system_code VARCHAR(32)       NULL,
+            PRIMARY KEY (identity_id, attr_name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci');
+
+        foreach (self::IDENTITY_FIELDS as $canonical => $srcCol) {
+            $ranked = $this->rankedCandidatesSql($srcCol);
+
+            // The winner. LEFT(v, 500) matches gp_survivorship_audit.surviving_value,
+            // which is what this column feeds; every one of the nine source columns
+            // is at most 255 wide, so it never actually truncates.
             $hub->statement("
-                UPDATE gp_identity i
-                JOIN ( SELECT identity_id, v FROM ($ranked) r WHERE rn = 1 ) w
-                  ON w.identity_id = i.identity_id
-                SET i.`$canonical` = w.v");
+                INSERT INTO tmp_surv_field (identity_id, attr_name, v, link_id, system_id, system_code)
+                SELECT identity_id, '$canonical', LEFT(v, 500), link_id, system_id, system_code
+                FROM ($ranked) r WHERE rn = 1");
 
             // every candidate -> gp_attribute (winner flagged is_canonical)
             $hub->statement("
                 INSERT INTO gp_attribute (identity_id, attr_name, attr_value, source_link_id, is_canonical, observed_at)
                 SELECT identity_id, '$canonical', LEFT(v, 255), link_id, IF(rn = 1, 1, 0), NOW()
                 FROM ($ranked) r");
-
-            // winner -> gp_survivorship_audit
-            $hub->statement("
-                INSERT INTO gp_survivorship_audit
-                    (identity_id, attribute_name, surviving_value, system_id, source_link_id, rule_applied, decided_at)
-                SELECT identity_id, '$canonical', LEFT(v, 500), system_id, link_id,
-                       CONCAT('authority[', system_code, '] + recency'), NOW()
-                FROM ($ranked) r WHERE rn = 1");
         }
 
-        // record_count + last_updated (Survivorship folds these in per identity).
-        $hub->statement('
-            UPDATE gp_identity i
-            JOIN ( SELECT identity_id, COUNT(*) c FROM gp_source_link GROUP BY identity_id ) k
-              ON k.identity_id = i.identity_id
-            SET i.record_count = k.c, i.last_updated = NOW()');
+        // winners -> gp_survivorship_audit. One statement for all nine fields now
+        // that the winners are materialised, where it used to be one per field.
+        $hub->statement("
+            INSERT INTO gp_survivorship_audit
+                (identity_id, attribute_name, surviving_value, system_id, source_link_id, rule_applied, decided_at)
+            SELECT identity_id, attr_name, v, system_id, link_id,
+                   CONCAT('authority[', system_code, '] + recency'), NOW()
+            FROM tmp_surv_field");
 
+        // Pivot: one row per identity, a column per canonical field, plus the
+        // record_count Survivorship folds in per identity.
+        //
+        // MAX() is a pivot here, not a choice of value: tmp_surv_field's primary key
+        // is (identity_id, attr_name), so at most one row can match each CASE.
+        //
+        // Driven from gp_source_link, not from tmp_surv_field, and LEFT JOINed: an
+        // identity with links but no non-blank value anywhere still needs its
+        // record_count, and Resolution\Survivorship::recompute() likewise returns
+        // early only when the identity has NO links at all. An identity with zero
+        // links appears in neither and is left completely alone by both paths.
+        $pivot = [];
+        foreach (array_keys(self::IDENTITY_FIELDS) as $canonical) {
+            $pivot[] = "MAX(CASE WHEN f.attr_name = '$canonical' THEN f.v END) AS `$canonical`";
+        }
+
+        $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_surv_winner');
+        $hub->statement('CREATE TEMPORARY TABLE tmp_surv_winner (INDEX idx_id (identity_id)) ENGINE=InnoDB AS
+            SELECT k.identity_id, k.c, '.implode(', ', $pivot).'
+            FROM ( SELECT identity_id, COUNT(*) c FROM gp_source_link GROUP BY identity_id ) k
+            LEFT JOIN tmp_surv_field f ON f.identity_id = k.identity_id
+            GROUP BY k.identity_id, k.c');
+    }
+
+    private function dropWinnerTables(): void
+    {
+        $this->hub()->statement('DROP TEMPORARY TABLE IF EXISTS tmp_surv_winner');
+        $this->hub()->statement('DROP TEMPORARY TABLE IF EXISTS tmp_surv_field');
     }
 
     /** gp_identity key indexes — mirror of SqlBackfill::IDENTITY_KEY_INDEXES. */
