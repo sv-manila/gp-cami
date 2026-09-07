@@ -7,6 +7,7 @@ use App\GoldenProfile\Materialize\ProfileMaterializer;
 use App\GoldenProfile\Materialize\SetFinalizer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
+use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -34,6 +35,8 @@ class Engine
 
     private SsnHashGuard $ssnGuard;
 
+    private JunkKeyGuard $junkGuard;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
@@ -42,6 +45,7 @@ class Engine
         $this->materializer = new ProfileMaterializer;
         $this->survivorship = new Survivorship;
         $this->ssnGuard = new SsnHashGuard;
+        $this->junkGuard = new JunkKeyGuard;
     }
 
     /** Per affected identity: recompute survivorship winners, then rebuild the profile. */
@@ -303,10 +307,13 @@ class Engine
         $q = $this->shardFilter($q, $col, $shard, $shards);
         $dupVals = $q->groupBy($col)->havingRaw('COUNT(*) > 1')->pluck($col);
         foreach ($dupVals as $val) {
-            // A filler ssn_hash is not evidence of shared identity. Resolution now
+            // A filler value is not evidence of shared identity. Resolution now
             // refuses to bind on one, but dedup would still fold together any
             // identities that already carry it — so screen here too.
             if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($val)) {
+                continue;
+            }
+            if ($col === 'npi' && $this->junkGuard->isBlocked('npi', (string) $val)) {
                 continue;
             }
             $ids = $hub->table('gp_identity')

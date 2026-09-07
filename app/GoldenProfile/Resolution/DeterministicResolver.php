@@ -2,6 +2,7 @@
 
 namespace App\GoldenProfile\Resolution;
 
+use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -17,6 +18,8 @@ class DeterministicResolver
 
     private SsnHashGuard $ssnGuard;
 
+    private JunkKeyGuard $junkGuard;
+
     /** Bind confidence per key, from config instead of literals. */
     private array $keyConfidence;
 
@@ -24,6 +27,7 @@ class DeterministicResolver
     {
         $this->probabilistic = new ProbabilisticResolver($systemId);
         $this->ssnGuard = new SsnHashGuard;
+        $this->junkGuard = new JunkKeyGuard;
         $this->keyConfidence = config('golden_profile.deterministic_keys', []);
     }
 
@@ -137,7 +141,10 @@ class DeterministicResolver
                 return [(int) $id, 'ssn_hash', $this->confidence('ssn_hash', 0.99)];
             }
         }
-        if ($p->npi) {
+        // Junk-screened the same way ssn_hash is above: a shared filler NPI
+        // would otherwise collapse every person carrying it at 0.99 confidence
+        // with no name or DOB cross-check. See JunkKeyGuard.
+        if ($p->npi && ! $this->junkGuard->isBlocked('npi', (string) $p->npi)) {
             $id = $hub->table('gp_identity')->where('npi', $p->npi)->where('status', 'active')
                 ->orderBy('identity_id')->value('identity_id');
             if ($id) {
@@ -241,10 +248,13 @@ class DeterministicResolver
         foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob'] as $col) {
             $srcCol = $col === 'canonical_dob' ? 'date_of_birth' : $col;
             if (empty($id->$col) && ! empty($p->$srcCol)) {
-                // Never promote a filler ssn_hash onto an identity that lacks one:
-                // it would spread the placeholder across more identities and hand
-                // later rows a bogus 0.99 key to match on.
+                // Never promote a filler ssn_hash/npi onto an identity that
+                // lacks one: it would spread the placeholder across more
+                // identities and hand later rows a bogus 0.99 key to match on.
                 if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($p->$srcCol)) {
+                    continue;
+                }
+                if ($col === 'npi' && $this->junkGuard->isBlocked('npi', (string) $p->$srcCol)) {
                     continue;
                 }
                 $upd[$col] = $p->$srcCol;

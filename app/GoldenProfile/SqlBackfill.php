@@ -3,6 +3,7 @@
 namespace App\GoldenProfile;
 
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
+use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -34,6 +35,8 @@ class SqlBackfill
 
     private SsnHashGuard $ssnGuard;
 
+    private JunkKeyGuard $junkGuard;
+
     /** Single-column deterministic key tiers, in confidence order. */
     private const KEY_TIERS = ['ssn_hash', 'npi', 'upin', 'dea_number'];
 
@@ -45,6 +48,7 @@ class SqlBackfill
         $this->systemId = $this->ensureSystem();
         $this->connector = new StreamlineLocalConnector($this->systemId);
         $this->ssnGuard = new SsnHashGuard;
+        $this->junkGuard = new JunkKeyGuard;
     }
 
     private function hub()
@@ -358,6 +362,13 @@ class SqlBackfill
         $blocked = $this->ssnGuard->buildBlocklistTable();
         $log('resolve', "ssn_hash blocklist: $blocked filler hash(es) excluded");
 
+        // Same for the npi tier — a Luhn-valid value reused as filler across
+        // unrelated people is invisible to NpiValidator and would bind every
+        // one of them at 0.99. Materialised here so the tier SQL can anti-join
+        // a table instead of threading a NOT IN list through every statement.
+        $npiBlocked = $this->junkGuard->buildBlocklistTable('npi');
+        $log('resolve', "npi junk blocklist: $npiBlocked value(s) excluded");
+
         // Single-column key tiers, highest confidence first. After each tier we
         // backfill identity keys from the just-linked rows so a later tier sees
         // an earlier identity's secondary keys (mirrors row-by-row backfillKeys)
@@ -447,10 +458,14 @@ class SqlBackfill
     /** Create one identity per distinct new value of $col among unlinked rows. */
     private function tierCreate(string $col): void
     {
-        // ssn_hash only: skip rows whose hash is on the filler blocklist so they
-        // fall through to the weaker-but-safe name+dob / residual tiers instead of
-        // all collapsing onto one identity.
-        $guard = $col === 'ssn_hash' ? $this->ssnGuard->exclusionSql('s.`ssn_hash`') : '';
+        // ssn_hash and npi: skip rows whose value is on the filler blocklist so
+        // they fall through to the weaker-but-safe name+dob / residual tiers
+        // instead of all collapsing onto one identity.
+        $guard = match ($col) {
+            'ssn_hash' => $this->ssnGuard->exclusionSql('s.`ssn_hash`'),
+            'npi' => $this->junkGuard->exclusionSql('npi', 's.`npi`'),
+            default => '',
+        };
 
         $this->hub()->statement(
             "INSERT INTO gp_identity
@@ -480,7 +495,11 @@ class SqlBackfill
     private function tierLink(string $col, string $keyName): void
     {
         // Same filler screen as tierCreate — see there.
-        $guard = $col === 'ssn_hash' ? $this->ssnGuard->exclusionSql('s.`ssn_hash`') : '';
+        $guard = match ($col) {
+            'ssn_hash' => $this->ssnGuard->exclusionSql('s.`ssn_hash`'),
+            'npi' => $this->junkGuard->exclusionSql('npi', 's.`npi`'),
+            default => '',
+        };
 
         $this->hub()->statement(
             "INSERT INTO gp_source_link
