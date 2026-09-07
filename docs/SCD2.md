@@ -125,6 +125,49 @@ added the matching tiebreak to each:
 | `terminated` | `source_modified DESC, stg_person_id DESC` | `orderByDesc('source_modified')` only | both keys |
 | `ssn_last_four` | `stg_person_id ASC` | no ordering at all | `->orderBy('stg_person_id')` |
 
+### A third, found by the parity test: the survivorship tiebreak is not shared
+
+`Resolution\Survivorship`'s comparator ends in `link_id ASC`, with a comment saying
+it is pinned there "to match `SetFinalizer`'s SQL ordering … because a mismatch
+broke the *rebuild produces a byte-identical profile* invariant". It does not buy
+that invariant, and plan 3b's `SetBasedParityTest` is what showed it.
+
+`link_id` is an artifact of the order `gp_source_link` rows were **inserted**, and
+the two paths do not insert them in the same order:
+
+| Path | How links are created |
+|---|---|
+| per-row | one link per `resolve()` call, in staging order |
+| set-based | all of them in one `INSERT … SELECT` inside `tierLink()`, in the join's row order |
+
+So the tiebreak is deterministic *within* a path and not shared *between* them.
+When candidates tie on both authority and recency, the two paths can crown
+different canonical winners. Observed on the eval fixture's `ssn-a` / `ssn-b` pair,
+which ties because `EvalRunner` stages every row with the same `source_modified`:
+the per-row path crowns `Grace`, the set-based path `Gracie`.
+
+**Not fixed in 3b.** The fix is to break the tie on something both paths agree on —
+`gp_source_link.source_id` is stable and identical across them — but that changes
+which canonical value wins in production ties, which is a survivorship change and
+not a parity plan's to make. `SetBasedParityTest::TIEBREAK_DEPENDENT` names the
+five affected profile columns and excludes them, and a companion test asserts the
+exemption cannot hide a value that no staged row supplied.
+
+Clustering and the eval gate are unaffected: the gate scores which records group
+together, not which spelling of a name wins.
+
+### And one real defect, fixed here
+
+Before SCD-2 a merged-away identity was DELETED, so it could never be
+materialised. 3a made a merge retain the loser with a final current version saying
+`status = 'merged'` — and `applyMerge()` deletes the loser's profile only for
+`SetFinalizer::materializeRange()` and `Engine::finalizeAll()` to rebuild it,
+because both filtered `current = 1` and not `status = 'active'`. The result was a
+served `gp_identity_profile` row for an identity that no longer exists, carrying no
+links and no facts, readable through `IdentitySearchController`.
+
+Both now filter `current = 1 AND status = 'active'`. Found by
+`SetBasedParityTest`, which saw one extra profile keyed to an empty grouping.
 ### Two divergences that are NOT fixed here
 
 - **Which staged row's value wins for a repeated licence or address.** The per-row

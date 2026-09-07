@@ -5,7 +5,6 @@ namespace App\GoldenProfile;
 use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\QuarantineRecorder;
-use App\GoldenProfile\Support\SetBasedPathGuard;
 use App\GoldenProfile\Support\SetVersionWriter;
 use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
@@ -137,13 +136,6 @@ class SqlBackfill
     /** Post-staging transform: resolve → enrich → dedup → rollup (single process). */
     public function transform(?callable $log = null): void
     {
-        // transform(), not run(): run() calls stage() then transform(), and
-        // stage() alone is safe — it writes only stg_* and src_*, none of them
-        // versioned. Guarding here lets an operator stage a load, stop, and
-        // finish it with the per-row path once plan 3b lands, instead of
-        // throwing the staging work away.
-        (new SetBasedPathGuard)->assertConverted(self::class);
-
         $log ??= fn ($p, $d) => null;
         $this->indexStaging($log);
         $log('resolve', 'deterministic tiers');

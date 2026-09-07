@@ -237,8 +237,12 @@ class Engine
         // for one person, and reporting an inflated total. uq_identity_current
         // makes identity_id unique among current rows, so the cursor is valid
         // again.
+        // status = 'active' as well as current = 1, for the same reason
+        // SetFinalizer::materializeRange() filters both: a merged-away identity
+        // keeps a current row now, and recomputing survivorship for it would
+        // rebuild the profile applyMerge() just deleted.
         $q = fn () => $this->hub()->table('gp_identity')
-            ->where('current', 1)
+            ->where('current', 1)->where('status', 'active')
             ->when($shards > 1, fn ($qq) => $qq->whereRaw('identity_id % ? = ?', [$shards, $shard]));
 
         $total = (int) $q()->count();
@@ -835,7 +839,8 @@ class Engine
     {
         $ids = $identityId
             ? [$identityId]
-            : $this->hub()->table('gp_identity')->where('current', 1)->pluck('identity_id')->all();
+            : $this->hub()->table('gp_identity')->where('current', 1)
+                ->where('status', 'active')->pluck('identity_id')->all();
         foreach ($ids as $id) {
             $this->materializer->rebuild((int) $id);
         }

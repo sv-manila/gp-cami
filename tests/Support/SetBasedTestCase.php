@@ -3,6 +3,7 @@
 namespace Tests\Support;
 
 use App\GoldenProfile\SqlBackfill;
+use App\GoldenProfile\Support\Versioner;
 
 /**
  * Base case for tests that drive the SET-BASED paths.
@@ -125,5 +126,142 @@ abstract class SetBasedTestCase extends HubTestCase
 
         return (int) $this->hub()->table('gp_source_system')
             ->where('system_code', SqlBackfill::SYSTEM_CODE)->value('system_id');
+    }
+
+    /**
+     * Which source rows ended up grouped together, keyed by nothing — a sorted
+     * list of sorted source_id lists.
+     *
+     * Deliberately NOT keyed on identity_id. The two paths mint identities in
+     * different orders, so comparing by id would compare an accident; comparing
+     * the grouping compares the thing that matters.
+     *
+     * @return list<string>
+     */
+    protected function clusterSnapshot(int $systemId): array
+    {
+        $byIdentity = [];
+
+        foreach ($this->hub()->table('gp_source_link')
+            ->where('system_id', $systemId)->orderBy('link_id')
+            ->get(['identity_id', 'source_id']) as $link) {
+            $byIdentity[(int) $link->identity_id][] = (int) $link->source_id;
+        }
+
+        $clusters = array_map(function ($sources) {
+            sort($sources);
+
+            return implode(',', $sources);
+        }, $byIdentity);
+
+        // SORT_STRING, not the default. PHP's default flags compare two
+        // numeric-looking strings NUMERICALLY, so a singleton grouping
+        // ('3783030782') and a multi-row one ('2034175822,2536599138,…') get
+        // compared under different rules. That is not a total order, and it made
+        // this snapshot's element order differ between two runs over identical
+        // data — a false parity failure.
+        sort($clusters, SORT_STRING);
+
+        return array_values($clusters);
+    }
+
+    /**
+     * How many versions each versioned table holds, and how many are current.
+     *
+     * The headline number of the whole programme: if one path mints more versions
+     * than the other from identical input, VersionerSql::same() and
+     * Versioner::same() have diverged.
+     *
+     * TOTAL row counts are deliberately NOT compared, and that is a finding rather
+     * than a concession. The set-based ladder has no licence or identifier tier at
+     * resolve time — resolveDeterministic()'s own comment explains that both are
+     * handled afterwards by dedup — so it reaches the same grouping by
+     * create-then-MERGE where the per-row path binds directly. Since 3a a merge
+     * retains the loser as a final version rather than deleting it, so the
+     * set-based route legitimately leaves a deeper history for the same outcome.
+     * Comparing totals would compare the ROUTE; comparing current rows compares
+     * the OUTCOME, which is what parity means here. Plan 5's
+     * IdentifierTierParityTest already drew that line for DEA/MMIS: prove the two
+     * paths converge, not that the mechanisms match.
+     *
+     * @return array<string,int>
+     */
+    protected function versionCensus(): array
+    {
+        $census = [];
+
+        foreach (array_keys(Versioner::TABLES) as $table) {
+            if ($table === 'gp_identity') {
+                // Counted as ACTIVE current rows below instead. A raw current count
+                // includes merged-away identities, whose latest version says
+                // status = 'merged' — and those exist only on the route that
+                // merges, so comparing them compares the route.
+                continue;
+            }
+
+            $census[$table] = (int) $this->hub()->table($table)->where('current', 1)->count();
+        }
+
+        $census['gp_identity:active'] = (int) $this->hub()->table('gp_identity')
+            ->where('current', 1)->where('status', 'active')->count();
+
+        return $census;
+    }
+
+    /**
+     * Every profile row, keyed by its source-row grouping rather than identity_id,
+     * with volatile columns dropped and JSON arrays canonicalised to multisets.
+     *
+     * Keyed on the grouping for the same reason clusterSnapshot() is: the two
+     * paths do not agree on identity_id and are not required to. JSON arrays are
+     * multisets because MySQL 8 has no ORDER BY inside JSON_ARRAYAGG — see
+     * docs/SCD2.md.
+     *
+     * @return array<string,array<string,mixed>>
+     */
+    protected function profileCensus(int $systemId): array
+    {
+        $volatile = ['identity_id', 'identity_uuid', 'first_seen', 'last_updated', 'profile_built_at'];
+        $jsonArrays = [
+            'identifiers', 'addresses', 'licenses', 'aliases', 'source_records',
+            'accounts', 'credentials', 'exclusions', 'board_actions', 'resolutions',
+        ];
+
+        $groupFor = [];
+        foreach ($this->hub()->table('gp_source_link')
+            ->where('system_id', $systemId)->get(['identity_id', 'source_id']) as $link) {
+            $groupFor[(int) $link->identity_id][] = (int) $link->source_id;
+        }
+
+        $census = [];
+
+        foreach ($this->hub()->table('gp_identity_profile')->get() as $profile) {
+            $sources = $groupFor[(int) $profile->identity_id] ?? [];
+            sort($sources);
+            $key = implode(',', $sources);
+
+            $row = (array) $profile;
+            foreach ($volatile as $column) {
+                unset($row[$column]);
+            }
+            foreach ($jsonArrays as $column) {
+                if (! array_key_exists($column, $row)) {
+                    continue;
+                }
+                $decoded = json_decode((string) $row[$column], true) ?? [];
+                $encoded = array_map(fn ($e) => json_encode($e), $decoded);
+                sort($encoded);
+                $row[$column] = $encoded;
+            }
+
+            // Prefixed: a PHP array key that looks like an integer BECOMES one,
+            // so a singleton grouping keyed '1731906240' would sort and compare
+            // as an int while a multi-row one stayed a string.
+            $census['g:'.$key] = $row;
+        }
+
+        ksort($census, SORT_STRING);
+
+        return $census;
     }
 }

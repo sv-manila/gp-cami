@@ -2,7 +2,6 @@
 
 namespace App\GoldenProfile\Materialize;
 
-use App\GoldenProfile\Support\SetBasedPathGuard;
 use App\GoldenProfile\Support\SetVersionWriter;
 use Illuminate\Support\Facades\DB;
 
@@ -54,8 +53,6 @@ class SetFinalizer
 
     public function run(?callable $log = null): void
     {
-        (new SetBasedPathGuard)->assertConverted(self::class);
-
         $log ??= fn ($p, $d) => null;
         $log('finalize', 'survivorship (set-based)');
         $this->survivorship();
@@ -570,7 +567,16 @@ class SetFinalizer
         LEFT JOIN ($alias) alias ON alias.identity_id = i.identity_id
         LEFT JOIN ($term) term   ON term.identity_id = i.identity_id
         LEFT JOIN ($ssn4) ssn4   ON ssn4.identity_id = i.identity_id
-        WHERE i.identity_id >= $lo AND i.identity_id < $hi AND i.`current` = 1");
+        -- status = 'active' as well as current = 1. Before SCD-2 a merged-away
+        -- identity was DELETED, so it could never be materialised; 3a made a merge
+        -- retain the row with a final current version saying status = 'merged', and
+        -- applyMerge() deletes the loser's profile only for this statement to
+        -- rebuild it. The result was a served profile row for an identity that no
+        -- longer exists, carrying no links and no facts. Found by
+        -- SetBasedParityTest, which saw one extra profile keyed to an empty
+        -- grouping.
+        WHERE i.identity_id >= $lo AND i.identity_id < $hi
+          AND i.`current` = 1 AND i.`status` = 'active'");
 
         return (int) $hub->selectOne("SELECT COUNT(*) c FROM gp_identity_profile WHERE $r")->c;
     }

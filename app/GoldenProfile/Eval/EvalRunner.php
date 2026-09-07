@@ -2,7 +2,9 @@
 
 namespace App\GoldenProfile\Eval;
 
+use App\GoldenProfile\Engine;
 use App\GoldenProfile\Resolution\DeterministicResolver;
+use App\GoldenProfile\SqlBackfill;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -16,6 +18,13 @@ use Illuminate\Support\Facades\DB;
  * here would let a caller stage into a scratch database while the resolver wrote
  * identities into the real hub. Point the CONNECTION at a scratch schema
  * (GP_DB_DATABASE), never a different connection name.
+ *
+ * TWO MODES, because the ladder is implemented twice. run() drives the per-row
+ * resolver (gp:sync's path); runSetBased() drives SqlBackfill (gp:backfill's path).
+ * They must score the eval set identically — that is the cheapest parity check the
+ * programme has, and EvalGateBothPathsTest asserts it. If they ever diverge, the
+ * gate becomes the second line of defence behind SetBasedParityTest rather than the
+ * first sign of trouble.
  */
 class EvalRunner
 {
@@ -27,9 +36,16 @@ class EvalRunner
     }
 
     /**
-     * @return array{clusters: list<list<string>>, report: array<string,mixed>}
+     * Stage every record with its licences and identifiers. Returns
+     * ref => stg_person_id.
+     *
+     * source_id is crc32($ref), which is DETERMINISTIC — the same fixture staged
+     * twice produces the same source ids, which is what lets a parity test run both
+     * ladders over identical input and compare clusters by ref.
+     *
+     * @return array<string,int>
      */
-    public function run(EvalSet $set): array
+    public function stage(EvalSet $set): array
     {
         $stgByRef = [];
 
@@ -88,11 +104,78 @@ class EvalRunner
             }
         }
 
+        return $stgByRef;
+    }
+
+    /**
+     * PER-ROW path: DeterministicResolver::resolve() once per staged row. Six
+     * deterministic tiers plus Pass B, with enrich() inline, which is why no
+     * separate enrich or dedup step appears here.
+     *
+     * @return array{clusters: list<list<string>>, report: array<string,mixed>}
+     */
+    public function run(EvalSet $set): array
+    {
+        $stgByRef = $this->stage($set);
         $resolver = new DeterministicResolver($this->systemId);
 
         $byIdentity = [];
         foreach ($stgByRef as $ref => $stgId) {
             $byIdentity[$resolver->resolve($stgId)][] = $ref;
+        }
+
+        $clusters = array_values($byIdentity);
+
+        return [
+            'clusters' => $clusters,
+            'report' => MatchScorer::score($clusters, $set->truthClusters()),
+        ];
+    }
+
+    /**
+     * SET-BASED path: SqlBackfill's tiers, then enrich(), then Engine::dedup().
+     *
+     * All three, and none of them optional. The set-based ladder has no licence
+     * tier, no identifier tier and no Pass B — resolveDeterministic()'s own comment
+     * records why: "license resolution is handled after enrich(), by dedup's
+     * mergeByLicense — it needs gp_license populated, which enrich() does", and
+     * "the probabilistic Pass B is intentionally skipped here". So enrich() and
+     * dedup() are not extras bolted on for the test; they are where the per-row
+     * path's licence and identifier tiers live, and omitting them would compare a
+     * four-tier ladder against a six-tier one.
+     *
+     * $this->systemId must be SqlBackfill's own (SYSTEM_CODE = 'streamline_local'),
+     * not a uniqid-suffixed test system: resolveDeterministic() filters
+     * stg_person on its own systemId, and Survivorship's authority rank is looked
+     * up by system_code.
+     *
+     * @return array{clusters: list<list<string>>, report: array<string,mixed>}
+     */
+    public function runSetBased(EvalSet $set): array
+    {
+        $stgByRef = $this->stage($set);
+
+        $backfill = new SqlBackfill;
+        $backfill->indexStaging();
+        $backfill->resolveDeterministic();
+        $backfill->enrich();
+        (new Engine)->dedup();
+
+        // gp_source_link is repointed onto the survivor by a merge, so grouping the
+        // links by identity_id gives the post-dedup clustering directly.
+        $refBySource = [];
+        foreach (array_keys($stgByRef) as $ref) {
+            $refBySource[crc32($ref)] = $ref;
+        }
+
+        $byIdentity = [];
+        foreach ($this->hub()->table('gp_source_link')
+            ->where('system_id', $this->systemId)
+            ->orderBy('link_id')->get(['identity_id', 'source_id']) as $link) {
+            $ref = $refBySource[(int) $link->source_id] ?? null;
+            if ($ref !== null) {
+                $byIdentity[(int) $link->identity_id][] = $ref;
+            }
         }
 
         $clusters = array_values($byIdentity);
