@@ -19,7 +19,7 @@ Two more are specified but not written. Nothing has been pushed.
 ## 2. Branch state
 
 ```
-branch  feat/eval-harness   (29 commits ahead of master @ 17d383d)
+branch  feat/eval-harness   (28 commits ahead of master @ 17d383d)
 suite   95 tests, 270 assertions, 0 skipped
 style   vendor/bin/pint --test clean
 tree    clean
@@ -30,7 +30,7 @@ Verify with:
 
 ```bash
 cd /c/projects/dramiel/gp-cami
-git log --oneline 17d383d..HEAD | wc -l      # expect 29
+git log --oneline 17d383d..HEAD | wc -l      # expect 28
 vendor/bin/phpunit --fail-on-skipped         # expect 95/95
 ```
 
