@@ -25,7 +25,13 @@ class ProfileMaterializer
     public function rebuild(int $identityId): void
     {
         $hub = $this->hub();
-        $identity = $hub->table('gp_identity')->where('identity_id', $identityId)->first();
+        // The profile is a projection of the CURRENT version of everything. It is
+        // itself unversioned (a rebuildable read model whose rows reach 100MB of
+        // JSON — see docs/SCD2.md), which makes these filters the only thing
+        // keeping it correct. A missing one does not throw: it doubles a count and
+        // duplicates a JSON entry.
+        $identity = $hub->table('gp_identity')
+            ->where('identity_id', $identityId)->where('current', 1)->first();
         if (! $identity) {
             return;
         }
@@ -56,20 +62,23 @@ class ProfileMaterializer
             ->map(fn ($a) => ['type' => $a->alias_type, 'first' => $a->first_name, 'last' => $a->last_name])
             ->unique(fn ($a) => $a['type'].'|'.$a['first'].'|'.$a['last'])->values();
 
-        $licenses = $hub->table('gp_license')->where('identity_id', $identityId)->get()
+        $licenses = $hub->table('gp_license')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($l) => [
                 'number' => $l->license_number, 'state' => $l->certification_state,
                 'board' => $l->certification_board, 'type' => $l->license_type,
                 'registry' => $l->registry, 'verified' => (bool) $l->is_verified,
             ])->values();
 
-        $identifiers = $hub->table('gp_identity_identifier')->where('identity_id', $identityId)->get()
+        $identifiers = $hub->table('gp_identity_identifier')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($r) => ['type' => $r->id_type, 'value' => $r->id_value])
             ->unique(fn ($r) => $r['type'].'|'.$r['value'])->values();
         // Fall back the profile's dea_number column to a DEA identifier for display.
         $deaFromIdentifier = $identifiers->firstWhere('type', 'dea')['value'] ?? null;
 
-        $addresses = $hub->table('gp_address')->where('identity_id', $identityId)->get();
+        $addresses = $hub->table('gp_address')
+            ->where('identity_id', $identityId)->where('current', 1)->get();
         $primary = $addresses->firstWhere('is_primary', 1) ?? $addresses->first();
         $addressJson = $addresses->map(fn ($a) => [
             'type' => $a->is_primary ? 'primary' : 'alt',
@@ -77,7 +86,8 @@ class ProfileMaterializer
             'city' => $a->city, 'state' => $a->state, 'zip' => $a->zip,
         ])->values();
 
-        $credentials = $hub->table('gp_identity_credential')->where('identity_id', $identityId)->get()
+        $credentials = $hub->table('gp_identity_credential')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($c) => [
                 'credential_match_id' => (int) $c->credential_match_id, 'registry' => $c->registry,
                 'status' => $c->match_summary_status, 'status_code' => $c->match_summary_status_code,
@@ -88,7 +98,8 @@ class ProfileMaterializer
                 'link_state' => $c->link_state,
             ])->values();
 
-        $exclusions = $hub->table('gp_identity_exclusion')->where('identity_id', $identityId)->get()
+        $exclusions = $hub->table('gp_identity_exclusion')
+            ->where('identity_id', $identityId)->where('current', 1)->get()
             ->map(fn ($e) => [
                 'match_id' => (int) $e->match_id, 'registry' => $e->registry,
                 'is_ssn_match' => (bool) $e->is_ssn_match, 'is_npi_match' => (bool) $e->is_npi_match,
