@@ -70,4 +70,31 @@ class EvalSetShapeTest extends TestCase
             'truth' => [['x', 'ghost']],
         ], 'memory');
     }
+
+    public function test_the_retired_ssn_pair_is_still_in_the_set(): void
+    {
+        // The ssn_hash tier is gone and this pair is now an accepted false split.
+        // Deleting the records would restore a perfect recall score for a strictly
+        // worse matcher — the one thing docs/EVALUATION.md forbids outright. The
+        // pair is the fixture's memory of a capability the hub gave up.
+        $refs = array_column($this->set()->records(), 'ref');
+
+        $this->assertContains('ssn-a', $refs);
+        $this->assertContains('ssn-b', $refs);
+    }
+
+    public function test_the_retired_ssn_pair_is_still_one_truth_cluster(): void
+    {
+        // Splitting them in the ANSWER KEY would be the subtler way to make the
+        // gate green: true_pairs drops to 10 and recall returns to 1.0 without a
+        // single record being deleted. The answer key records who the same person
+        // IS, which the matcher's ability to find them does not change.
+        $clusters = array_filter(
+            $this->set()->truthClusters(),
+            fn ($c) => in_array('ssn-a', $c, true),
+        );
+
+        $this->assertCount(1, $clusters);
+        $this->assertContains('ssn-b', reset($clusters));
+    }
 }

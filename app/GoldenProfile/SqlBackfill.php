@@ -6,7 +6,6 @@ use App\GoldenProfile\Connectors\StreamlineLocalConnector;
 use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\QuarantineRecorder;
 use App\GoldenProfile\Support\SetVersionWriter;
-use App\GoldenProfile\Support\SsnHashGuard;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -35,14 +34,12 @@ class SqlBackfill
 
     private StreamlineLocalConnector $connector;
 
-    private SsnHashGuard $ssnGuard;
-
     private JunkKeyGuard $junkGuard;
 
     private QuarantineRecorder $quarantine;
 
     /** Single-column deterministic key tiers, in confidence order. */
-    private const KEY_TIERS = ['ssn_hash', 'npi', 'upin', 'dea_number'];
+    private const KEY_TIERS = ['npi', 'upin', 'dea_number'];
 
     /** transaction() retry attempts for InnoDB deadlocks under parallel staging. */
     private const DEADLOCK_RETRIES = 5;
@@ -51,7 +48,6 @@ class SqlBackfill
     {
         $this->systemId = $this->ensureSystem();
         $this->connector = new StreamlineLocalConnector($this->systemId);
-        $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
         $this->quarantine = new QuarantineRecorder;
     }
@@ -112,7 +108,6 @@ class SqlBackfill
         }
 
         $indexes = [
-            'stg_ssn' => 'ssn_hash',
             'stg_npi' => 'npi',
             'stg_upin' => 'upin',
             'stg_dea' => 'dea_number',
@@ -402,14 +397,13 @@ class SqlBackfill
     {
         $log ??= fn ($p, $d) => null;
 
-        // Filler SSNs must be identified before the ssn_hash tier runs. Without
-        // this, every person carrying a placeholder SSN hashes to the same value
-        // and the tier binds them all to one identity at 0.99 confidence with no
-        // name or DOB cross-check — a false merge nothing downstream undoes.
-        $blocked = $this->ssnGuard->buildBlocklistTable();
-        $log('resolve', "ssn_hash blocklist: $blocked filler hash(es) excluded");
+        // There is no ssn_hash tier and therefore no filler-SSN blocklist to build.
+        // Both existed because ssn_hash was an exact 0.99 key with no name or DOB
+        // cross-check, so every person carrying a placeholder SSN hashed to the same
+        // value and the tier bound them all to one identity. The tier is gone
+        // (Delivery Checklist §1), so the guard has nothing left to guard.
 
-        // Same for the npi tier — a Luhn-valid value reused as filler across
+        // The npi tier keeps its screen — a Luhn-valid value reused as filler across
         // unrelated people is invisible to NpiValidator and would bind every
         // one of them at 0.99. Materialised here so the tier SQL can anti-join
         // a table instead of threading a NOT IN list through every statement.
@@ -572,10 +566,12 @@ class SqlBackfill
      *   - backfillKeys() uses the value from the row being resolved; this uses
      *     MAX() across every linked row.
      *
-     * A THIRD is owned by plan 2: backfillKeys() refuses to promote a filler
-     * ssn_hash onto an identity that lacks one, and this has no blocklist screen at
-     * all. Adding it is a matching change, and plan 2 deletes ssn_hash from both
-     * paths, so it is recorded rather than fixed.
+     * A THIRD was owned by plan 2 and is now closed by deletion: backfillKeys()
+     * refused to promote a filler ssn_hash onto an identity that lacked one, and
+     * this statement had no blocklist screen at all. Plan 2 removed the ssn_hash
+     * tier and both paths stopped carrying the column, so the divergence has no
+     * column left to differ over. The npi divergence it was grouped with is real
+     * and still open: backfillKeys() screens a junk npi here, this does not.
      *
      * WHY THIS STILL RUNS BETWEEN EVERY TIER. Its call site explains it: "after each
      * tier we backfill identity keys from the just-linked rows so a later tier sees
@@ -593,7 +589,6 @@ class SqlBackfill
         $hub->statement('DROP TEMPORARY TABLE IF EXISTS tmp_backfill_keys');
         $hub->statement('CREATE TEMPORARY TABLE tmp_backfill_keys (INDEX idx_id (identity_id)) ENGINE=InnoDB AS
             SELECT i.identity_id,
-                   IF(i.ssn_hash        IS NULL, k.ssn_hash,   NULL) AS ssn_hash,
                    IF(i.npi             IS NULL, k.npi,        NULL) AS npi,
                    IF(i.upin            IS NULL, k.upin,       NULL) AS upin,
                    IF(i.dea_number      IS NULL, k.dea_number, NULL) AS dea_number,
@@ -604,7 +599,7 @@ class SqlBackfill
             FROM gp_identity i
             JOIN (
                 SELECT l.identity_id,
-                       MAX(s.ssn_hash) ssn_hash, MAX(s.npi) npi, MAX(s.upin) upin, MAX(s.dea_number) dea_number,
+                       MAX(s.npi) npi, MAX(s.upin) upin, MAX(s.dea_number) dea_number,
                        MAX(s.date_of_birth) dob, MAX(s.first_name) fn, MAX(s.last_name) ln, MAX(s.middle_name) mn
                 FROM gp_source_link l
                 JOIN stg_person s ON s.system_id=l.system_id AND s.source_table=l.source_table AND s.source_id=l.source_id
@@ -613,7 +608,7 @@ class SqlBackfill
             WHERE i.status = \'active\' AND i.`current` = 1');
 
         (new SetVersionWriter)->writeIdentities('tmp_backfill_keys', [
-            'ssn_hash', 'npi', 'upin', 'dea_number',
+            'npi', 'upin', 'dea_number',
             'canonical_dob', 'canonical_first', 'canonical_last', 'canonical_middle',
         ]);
 
@@ -623,11 +618,11 @@ class SqlBackfill
     /** Create one identity per distinct new value of $col among unlinked rows. */
     private function tierCreate(string $col): void
     {
-        // ssn_hash and npi: skip rows whose value is on the filler blocklist so
-        // they fall through to the weaker-but-safe name+dob / residual tiers
-        // instead of all collapsing onto one identity.
+        // npi: skip rows whose value is on the filler blocklist so they fall
+        // through to the weaker-but-safe name+dob / residual tiers instead of all
+        // collapsing onto one identity. ssn_hash had the same screen and both are
+        // gone with the tier.
         $guard = match ($col) {
-            'ssn_hash' => $this->ssnGuard->exclusionSql('s.`ssn_hash`'),
             'npi' => $this->junkGuard->exclusionSql('npi', 's.`npi`'),
             default => '',
         };
@@ -635,10 +630,10 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status,
+                 npi, upin, dea_number, confidence, record_count, status,
                  version_no, `current`, first_seen, last_updated)
              SELECT UUID(), r.first_name, r.middle_name, r.last_name, r.date_of_birth,
-                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
+                 r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
                  1, 1, NOW(), NOW()
              FROM stg_person r
              JOIN (
@@ -665,7 +660,6 @@ class SqlBackfill
     {
         // Same filler screen as tierCreate — see there.
         $guard = match ($col) {
-            'ssn_hash' => $this->ssnGuard->exclusionSql('s.`ssn_hash`'),
             'npi' => $this->junkGuard->exclusionSql('npi', 's.`npi`'),
             default => '',
         };
@@ -694,10 +688,10 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status,
+                 npi, upin, dea_number, confidence, record_count, status,
                  version_no, `current`, first_seen, last_updated)
              SELECT UUID(), r.first_name, r.middle_name, r.last_name, r.date_of_birth,
-                 r.ssn_hash, r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
+                 r.npi, r.upin, r.dea_number, 1.0, 0, 'active',
                  1, 1, NOW(), NOW()
              FROM stg_person r
              JOIN (
@@ -777,10 +771,10 @@ class SqlBackfill
         $this->hub()->statement(
             "INSERT INTO gp_identity
                 (identity_uuid, canonical_first, canonical_middle, canonical_last, canonical_dob,
-                 ssn_hash, npi, upin, dea_number, confidence, record_count, status, stg_seed_id,
+                 npi, upin, dea_number, confidence, record_count, status, stg_seed_id,
                  version_no, `current`, first_seen, last_updated)
              SELECT UUID(), s.first_name, s.middle_name, s.last_name, s.date_of_birth,
-                 s.ssn_hash, s.npi, s.upin, s.dea_number, 1.0, 0, 'active', s.stg_person_id,
+                 s.npi, s.upin, s.dea_number, 1.0, 0, 'active', s.stg_person_id,
                  1, 1, NOW(), NOW()
              FROM stg_person s
              LEFT JOIN gp_source_link l
@@ -826,6 +820,13 @@ class SqlBackfill
         // exactly that way — Scd2SchemaTest's index assertion passed in
         // isolation and failed in the full suite, because a Feature test had
         // run this path in between.
+        // Still listed, and deliberately: plan 2 Task 3 said to drop it here
+        // because "the column goes in the Task 7 migration" — but Task 7 is four
+        // tasks later, and until it runs the migration still creates idx_ssn. A
+        // definition missing from this constant is not a no-op: this path DROPS
+        // every gp_identity key index and re-ADDs only what is listed here, so
+        // omitting idx_ssn would have the bulk path silently revert the migration.
+        // Goes when the column goes.
         'idx_ssn' => 'ssn_hash, `current`',
         'idx_npi' => 'npi, `current`',
         'idx_upin' => 'upin, `current`',

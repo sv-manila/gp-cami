@@ -16,11 +16,21 @@ class DeterministicKeyConfigTest extends TestCase
     {
         $keys = config('golden_profile.deterministic_keys');
 
-        foreach (['ssn_hash', 'npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state', 'license_number+certification_state', 'name+dob'] as $tier) {
+        foreach (['npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state', 'license_number+certification_state', 'name+dob'] as $tier) {
             $this->assertArrayHasKey($tier, $keys, "tier $tier has no configured confidence");
             $this->assertGreaterThan(0.0, $keys[$tier]);
             $this->assertLessThanOrEqual(1.0, $keys[$tier]);
         }
+    }
+
+    public function test_ssn_hash_is_not_a_configured_tier(): void
+    {
+        // The GPP conformance programme removed the ssn_hash tier because the
+        // Delivery Checklist §1 forbids the hub storing an SSN. A confidence left
+        // in this map would be inert — the resolver has no such tier to score —
+        // but it would read as though the capability still existed, which is
+        // exactly the kind of drift this file was written to stop.
+        $this->assertArrayNotHasKey('ssn_hash', config('golden_profile.deterministic_keys'));
     }
 
     public function test_name_dob_ranks_below_the_hard_identifier_tiers(): void
@@ -28,8 +38,10 @@ class DeterministicKeyConfigTest extends TestCase
         $keys = config('golden_profile.deterministic_keys');
 
         // A shared common name plus a shared birthday is weaker evidence than a
-        // shared SSN or NPI; if that ordering inverts, the tier order is wrong.
-        foreach (['ssn_hash', 'npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state'] as $strong) {
+        // shared NPI, DEA, UPIN or MMIS; if that ordering inverts, the tier order
+        // is wrong. ssn_hash headed this list until the GPP conformance programme
+        // removed the tier.
+        foreach (['npi', 'dea_number', 'upin', 'dea_multi', 'mmis+state'] as $strong) {
             $this->assertLessThan($keys[$strong], $keys['name+dob']);
         }
     }
@@ -41,11 +53,14 @@ class DeterministicKeyConfigTest extends TestCase
         // The confidence() helper must be how tiers get their score. Bare 0.99 /
         // 0.95 literals in the match tiers are the regression this guards against.
         $this->assertStringContainsString('golden_profile.deterministic_keys', $source);
+        // Six call sites for seven configured tiers: dea_multi and mmis+state
+        // share one, via $confKey in the identifier tier. Was 7 before the GPP
+        // conformance programme removed ssn_hash.
         $this->assertSame(
-            7,
+            6,
             preg_match_all('/\$this->confidence\(/', $source),
-            'the 6 original tiers plus the new multi-valued identifier tier '
-            .'(dea_multi/mmis+state, which shares one call site via $confKey) should be 7',
+            'the 5 remaining single-key tiers plus the multi-valued identifier tier '
+            .'(dea_multi/mmis+state, which shares one call site via $confKey) should be 6',
         );
     }
 

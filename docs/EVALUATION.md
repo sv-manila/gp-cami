@@ -72,16 +72,17 @@ against the scratch hub. They are NOT production-hub measurements and say
 nothing about the still-`PENDING` table above; the one number in plan 5 that
 does need a real hub is `gp:npi-audit`'s (see below).
 
-| Metric | Plan 1 (`bd80f55`) | Plan 5 (match keys & data quality) |
-|---|---|---|
-| Precision | 1.0000 | **1.0000** |
-| Recall | 1.0000 | **1.0000** |
-| F1 | 1.0000 | **1.0000** |
-| False merges | 0 | **0** |
-| False splits | 0 | **0** |
-| True pairs | 9 | **11** |
-| Records | 17 | **23** |
-| Clusters | 10 | **14** |
+| Metric | Plan 1 (`bd80f55`) | Plan 5 (match keys & data quality) | Plan 2 (SSN removal) |
+|---|---|---|---|
+| Precision | 1.0000 | 1.0000 | **1.0000** |
+| Recall | 1.0000 | 1.0000 | **0.9091** (10/11) |
+| F1 | 1.0000 | 1.0000 | **0.9524** (20/21) |
+| False merges | 0 | 0 | **0** |
+| False splits | 0 | 0 | **1** |
+| True pairs | 9 | 11 | **11** |
+| True positives | 9 | 11 | **10** |
+| Records | 17 | 23 | **23** |
+| Clusters | 10 | 14 | **14** |
 
 **Why `true_pairs` moved 9 → 11, and why that is not a relaxation.** Plan 5
 promotes DEA and (state, MMIS) to real match keys, so the fixture gained two
@@ -93,13 +94,42 @@ records. Precision stayed at 1.0000 rather than merely clearing its 0.99
 floor, and `false_merges` stayed at 0, which is what the two foils are there to
 prove.
 
-`EvalGateTest` ratchets on these numbers (`false_splits === 0`,
-`recall === 1.0`) in addition to the pre-existing floors, so a regression against
-this baseline fails the build even though it would still clear the floors. **Plan
-2 must re-baseline these two ratchet assertions in the same PR that removes the
-`ssn_hash` tier**, stating the new measured numbers in the PR description. Under
-the canonical order (`00-PROGRAMME.md` §2) plan 2 sees `true_pairs` 11, so its
-own stated `recall → 0.8889 (8/9)` becomes **0.9091 (10/11)**.
+**Why recall moved 1.0000 → 0.9091, and why that is correct.** The `ssn_hash`
+tier was the only evidence binding `ssn-a` to `ssn-b`. Delivery Checklist §1
+requires that the hub never store an SSN and the GPP Data Model has no SSN column
+in the golden layer, so the tier was removed from both ladders and from
+`Engine::dedup()`. That pair is now a **known, accepted false split** and stays in
+the fixture permanently. Precision is unaffected — the tier only ever produced
+correct merges, so nothing it used to do was wrong; the hub simply is not allowed
+to do it. `00-PROGRAMME.md` §4 calls precision 1.0000 and `false_merges` 0
+absolute at every step, and both are met exactly here, not merely above their
+floors.
+
+`EvalGateTest` now ratchets on `false_splits === 1` and `true_positives === 10` —
+integer counts, because 10/11 has no exact decimal form and a float ratchet
+invites a widened tolerance later. It additionally asserts *which* pair may be
+split, so a future change cannot trade this split for a different one at the same
+count. The floors (precision ≥ 0.99, recall ≥ 0.80) are untouched and were never
+at risk.
+
+**Both ladders were re-baselined in the same commit.** `EvalGateBothPathsTest`
+carries the identical assertions against the set-based path — that test exists to
+prove the two implementations of the ladder agree, so re-baselining one and not
+the other would have turned a deliberate change into what looked like a parity
+regression.
+
+**The `ssn-*` records must not be deleted, and the answer key must not be re-cut
+to separate them.** Either move would return the report to a perfect score for a
+strictly worse matcher. `true_pairs >= 11` catches the first;
+`EvalSetShapeTest::test_the_retired_ssn_pair_is_still_one_truth_cluster` catches
+the second.
+
+**Plan 5 already supplied the compensating keys, before this task ran.** MMIS as
+a resolve-time tier and DEA promoted alongside it are why this baseline starts at
+11 true pairs rather than 9 — not because either one recovers *this* pair.
+Nothing but `ssn_hash` ever bound `ssn-a` to `ssn-b`, by fixture design, so no key
+plan 5 adds recovers this specific split; the recall floor recovers overall,
+across the fixture, not for this pair.
 
 ## SCD-2 versioning (plan 3a) — the gate did not move
 
@@ -192,7 +222,11 @@ below the PROJECT_PLAN target of 0.95 because Pass B cannot auto-merge today: it
 implemented weights sum to exactly `auto_merge_at`. Raise the floor as
 calibration lands. Never lower it to make a build pass.
 
-**Plan 2 will move this floor.** The `ssn-a`/`ssn-b` pair is bound by the
-`ssn_hash` tier. When that tier is removed, they become a false split and recall
-drops by a known, measured amount. Re-baseline the floor in that PR and say so in
-the description — do not delete the records to keep the number up.
+**Plan 2 moved this baseline, not the floor.** The `ssn-a`/`ssn-b` pair was bound
+by the `ssn_hash` tier; when the tier was removed the pair became a false split
+and recall fell to a known, measured 10/11 (against plan 5's already-raised
+11-pair fixture — see `00-PROGRAMME.md` §2 and §4). The floors were never
+lowered: the two measured ratchets were re-baselined onto exact integer counts
+and the records stayed in the fixture. That is the pattern for any future
+capability removal — re-baseline the ratchet, keep the evidence, say so in the PR
+description.

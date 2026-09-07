@@ -3,7 +3,6 @@
 namespace App\GoldenProfile\Resolution;
 
 use App\GoldenProfile\Support\JunkKeyGuard;
-use App\GoldenProfile\Support\SsnHashGuard;
 use App\GoldenProfile\Support\Versioner;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -17,8 +16,6 @@ class DeterministicResolver
 {
     private ProbabilisticResolver $probabilistic;
 
-    private SsnHashGuard $ssnGuard;
-
     private JunkKeyGuard $junkGuard;
 
     private Versioner $versioner;
@@ -29,7 +26,6 @@ class DeterministicResolver
     public function __construct(private int $systemId)
     {
         $this->probabilistic = new ProbabilisticResolver($systemId);
-        $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
         $this->versioner = new Versioner;
         $this->keyConfidence = config('golden_profile.deterministic_keys', []);
@@ -150,18 +146,14 @@ class DeterministicResolver
         // or identifier must not bind, and neither must a live one hanging off a
         // superseded identity version.
         //
-        // ssn_hash is additionally screened for filler values: a shared placeholder
-        // SSN would otherwise collapse every person carrying it into one identity
-        // at 0.99 confidence with no name or DOB cross-check. See SsnHashGuard.
-        if ($p->ssn_hash && ! $this->ssnGuard->isBlocked($p->ssn_hash)) {
-            $id = $hub->table('gp_identity')->where('ssn_hash', $p->ssn_hash)
-                ->where('current', 1)->where('status', 'active')
-                ->orderBy('identity_id')->value('identity_id');
-            if ($id) {
-                return [(int) $id, 'ssn_hash', $this->confidence('ssn_hash', 0.99)];
-            }
-        }
-        // Junk-screened the same way ssn_hash is above: a shared filler NPI
+        // There is no ssn_hash tier. It used to lead this ladder at 0.99 — an exact
+        // match with no name or DOB cross-check, the strongest key the hub had — and
+        // it was removed by the GPP conformance programme because the Delivery
+        // Checklist §1 requires that the hub never store an SSN. npi now leads.
+        // Historical links still carry match_key = 'ssn_hash'; they are retained
+        // provenance, not something this method can reproduce.
+        //
+        // Junk-screened the way ssn_hash used to be: a shared filler NPI
         // would otherwise collapse every person carrying it at 0.99 confidence
         // with no name or DOB cross-check. See JunkKeyGuard.
         if ($p->npi && ! $this->junkGuard->isBlocked('npi', (string) $p->npi)) {
@@ -280,7 +272,6 @@ class DeterministicResolver
             'canonical_middle' => $p->middle_name,
             'canonical_last' => $p->last_name,
             'canonical_dob' => $p->date_of_birth,
-            'ssn_hash' => $p->ssn_hash,
             'npi' => $p->npi,
             'upin' => $p->upin,
             'dea_number' => $p->dea_number,
@@ -317,15 +308,16 @@ class DeterministicResolver
         }
 
         $upd = [];
-        foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob'] as $col) {
+        // ssn_hash was in this list, behind a SsnHashGuard screen that refused to
+        // promote a filler hash onto an identity that lacked one. Both are gone:
+        // there is no ssn_hash tier to hand a bogus 0.99 key to, and after the
+        // Task 7 migration there is no column to write.
+        foreach (['npi', 'upin', 'dea_number', 'canonical_dob'] as $col) {
             $srcCol = $col === 'canonical_dob' ? 'date_of_birth' : $col;
             if (empty($id->$col) && ! empty($p->$srcCol)) {
-                // Never promote a filler ssn_hash/npi onto an identity that
-                // lacks one: it would spread the placeholder across more
-                // identities and hand later rows a bogus 0.99 key to match on.
-                if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($p->$srcCol)) {
-                    continue;
-                }
+                // Never promote a filler npi onto an identity that lacks one: it
+                // would spread the placeholder across more identities and hand
+                // later rows a bogus 0.99 key to match on.
                 if ($col === 'npi' && $this->junkGuard->isBlocked('npi', (string) $p->$srcCol)) {
                     continue;
                 }

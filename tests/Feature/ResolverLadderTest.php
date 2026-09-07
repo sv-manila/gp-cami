@@ -104,36 +104,48 @@ class ResolverLadderTest extends HubTestCase
         $this->assertSame(['new', 'npi'], $keys);
     }
 
-    public function test_a_filler_ssn_hash_does_not_weld_unrelated_people_together(): void
+    public function test_a_shared_ssn_hash_no_longer_binds_two_rows(): void
     {
-        // config golden_profile.ssn.max_identities_per_hash is 3: a hash carried
-        // by more distinct people than that is filler and must not bind.
-        $refs = [];
-        foreach ([['Ana', 'Reyes', '1980-01-01'], ['Ben', 'Cruz', '1975-02-02'],
-            ['Cara', 'Diaz', '1990-03-03'], ['Dan', 'Evans', '1966-04-04']] as [$f, $l, $d]) {
-            $refs[] = $this->stagePerson([
-                'first_name' => $f, 'last_name' => $l, 'date_of_birth' => $d,
-                'ssn_hash' => str_repeat('a', 128),
-            ]);
-        }
-
-        $ids = array_map(fn ($r) => $this->resolve($r), $refs);
-
-        $this->assertCount(4, array_unique($ids), 'a filler ssn_hash must not collapse four people');
-    }
-
-    public function test_two_rows_sharing_an_ssn_hash_bind_to_one_identity(): void
-    {
-        // The highest-confidence tier in Pass A, and the one with the least
-        // coverage: two people below max_identities_per_hash (3) share a real
-        // (non-filler) hash, so SsnHashGuard must let it through and the tier
-        // must bind them.
+        // The inverse of the test this replaces. ssn_hash was the strongest key in
+        // Pass A (0.99, exact, no name or DOB cross-check); the Delivery Checklist
+        // §1 forbids the hub storing SSN at all, so the tier is gone and these two
+        // records — same real person, different first names, only one DOB — are a
+        // KNOWN, ACCEPTED false split. The eval gate carries the same pair and the
+        // same expectation; see docs/EVALUATION.md.
+        //
+        // The column is still present at this point in the plan (the migration is
+        // the last task), so staging a hash is still legal here. It simply has no
+        // effect, which is exactly what this asserts.
         $hash = hash('sha512', 'resolver-ladder-test-distinct-ssn');
 
         $a = $this->stagePerson(['first_name' => 'Grace', 'last_name' => 'Adeyemi', 'date_of_birth' => '1979-05-14', 'ssn_hash' => $hash]);
         $b = $this->stagePerson(['first_name' => 'Gracie', 'last_name' => 'Adeyemi', 'date_of_birth' => null, 'ssn_hash' => $hash]);
 
-        $this->assertSame($this->resolve($a), $this->resolve($b));
+        $this->assertNotSame(
+            $this->resolve($a), $this->resolve($b),
+            'the ssn_hash tier was removed by the GPP conformance programme — a shared hash must not bind',
+        );
+    }
+
+    public function test_no_link_is_ever_recorded_with_an_ssn_hash_match_key(): void
+    {
+        // Guards the provenance side of the removal. Task 8 retains historical
+        // links whose match_key is 'ssn_hash' as a record of what the hub used to
+        // do; no NEW link may claim that key, or the retained rows stop being
+        // distinguishable from fresh ones and the audit trail is worthless.
+        $hash = hash('sha512', 'resolver-ladder-test-no-new-ssn-links');
+
+        foreach ([['Ana', 'Reyes', '1980-01-01'], ['Ben', 'Cruz', '1975-02-02']] as [$f, $l, $d]) {
+            $this->resolve($this->stagePerson([
+                'first_name' => $f, 'last_name' => $l, 'date_of_birth' => $d, 'ssn_hash' => $hash,
+            ]));
+        }
+
+        $this->assertSame(
+            0,
+            $this->hub()->table('gp_source_link')->where('match_key', 'ssn_hash')->count(),
+            'resolution must never mint a new ssn_hash-keyed link',
+        );
     }
 
     public function test_two_rows_sharing_a_dea_number_bind_to_one_identity(): void

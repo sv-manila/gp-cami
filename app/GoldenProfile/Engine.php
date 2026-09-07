@@ -8,7 +8,6 @@ use App\GoldenProfile\Materialize\SetFinalizer;
 use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
 use App\GoldenProfile\Support\JunkKeyGuard;
-use App\GoldenProfile\Support\SsnHashGuard;
 use App\GoldenProfile\Support\Versioner;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -34,8 +33,6 @@ class Engine
 
     private Survivorship $survivorship;
 
-    private SsnHashGuard $ssnGuard;
-
     private JunkKeyGuard $junkGuard;
 
     private Versioner $versioner;
@@ -47,7 +44,6 @@ class Engine
         $this->resolver = new DeterministicResolver($this->systemId);
         $this->materializer = new ProfileMaterializer;
         $this->survivorship = new Survivorship;
-        $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
         $this->versioner = new Versioner;
     }
@@ -276,7 +272,7 @@ class Engine
     }
 
     /**
-     * Consolidate identities that share a deterministic key — ssn_hash, npi,
+     * Consolidate identities that share a deterministic key — npi,
      * upin, dea_number, license (number+state+board), or name+dob. Parallel
      * id-partitioned loading can mint separate identities for the same person
      * across partitions; this pass merges them so the graph matches what a
@@ -301,7 +297,7 @@ class Engine
         $merged = 0;
         do {
             $round = 0;
-            foreach (['ssn_hash', 'npi', 'upin', 'dea_number'] as $col) {
+            foreach (['npi', 'upin', 'dea_number'] as $col) {
                 $round += $this->mergeByColumn($col, $shard, $shards);
             }
             $round += $this->mergeByLicense($shard, $shards);
@@ -343,10 +339,8 @@ class Engine
         foreach ($dupVals as $val) {
             // A filler value is not evidence of shared identity. Resolution now
             // refuses to bind on one, but dedup would still fold together any
-            // identities that already carry it — so screen here too.
-            if ($col === 'ssn_hash' && $this->ssnGuard->isBlocked($val)) {
-                continue;
-            }
+            // identities that already carry it — so screen here too. ssn_hash had
+            // the same screen; the whole tier is gone (Delivery Checklist §1).
             if ($col === 'npi' && $this->junkGuard->isBlocked('npi', (string) $val)) {
                 continue;
             }
@@ -547,7 +541,10 @@ class Engine
         // version rather than an in-place update — and Versioner mints nothing when
         // there is nothing to inherit.
         $upd = [];
-        foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob',
+        // ssn_hash was inherited here too. With the tier gone there is nothing
+        // SSN-shaped left for a survivor to inherit, and the Task 7 migration
+        // removes the column outright.
+        foreach (['npi', 'upin', 'dea_number', 'canonical_dob',
             'canonical_first', 'canonical_last', 'canonical_middle'] as $c) {
             if (empty($s->$c) && ! empty($l->$c)) {
                 $upd[$c] = $l->$c;

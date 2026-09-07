@@ -24,7 +24,12 @@ return [
     | name+dob sits lower: common name + shared birthday can collide.
     */
     'deterministic_keys' => [
-        'ssn_hash' => 0.99,
+        // ssn_hash used to sit at the top of this list at 0.99. The GPP
+        // conformance programme removed it — Delivery Checklist §1 requires the
+        // hub never store an SSN, so there is nothing left to match on. Adding a
+        // key back here does NOT create a tier: DeterministicResolver reads this
+        // map for confidences only, and DeterministicKeyConfigTest asserts
+        // 'ssn_hash' is absent so it cannot creep back as a no-op either.
         'npi' => 0.99,
         // Vestigial for this source: stg_person.dea_number is always null from
         // StreamlineLocalConnector (DEA is multi-valued in this source, staged
