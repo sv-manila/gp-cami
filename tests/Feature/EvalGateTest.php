@@ -23,8 +23,12 @@ class EvalGateTest extends HubTestCase
         // free, so a floor on the metrics alone is not a regression net — this
         // pins the denominator. 9 true pairs = smith(3) + garcia(1) + kowalski(1)
         // + chain(3) + ssn(1).
+        // 9 original true pairs (plan 1's baseline) + 1 mmis+state pair
+        // (mmis-a/mmis-b) + 1 dea pair (dea-a/dea-b) = 11. Raised by plan 5
+        // in the same commit that adds those records, per the programme rule:
+        // never lower a floor, and re-baseline a legitimate move immediately.
         $this->assertGreaterThanOrEqual(
-            9, $report['true_pairs'],
+            11, $report['true_pairs'],
             'the eval set shrank — pairs were removed, not the matcher improved'
         );
 

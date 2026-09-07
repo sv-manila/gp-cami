@@ -74,6 +74,18 @@ class EvalRunner
                     'is_primary' => 1,
                 ]);
             }
+
+            // Identifiers, so the fixture can exercise the dea_multi and
+            // mmis+state tiers plan 5 added. state is absent on DEA rows in the
+            // fixture JSON (DEA is federal), hence the ?? null.
+            foreach ($set->identifiers($ref) as $ident) {
+                $this->hub()->table('stg_person_identifier')->insert([
+                    'stg_person_id' => $stgByRef[$ref],
+                    'id_type' => $ident['id_type'],
+                    'id_value' => $ident['id_value'],
+                    'state' => $ident['state'] ?? null,
+                ]);
+            }
         }
 
         $resolver = new DeterministicResolver($this->systemId);

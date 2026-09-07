@@ -30,24 +30,45 @@ there is no way to know how many identities the removal will fragment.
 
 ## Achieved — measured on this branch
 
-Measured against commit `bd80f55` with `vendor/bin/phpunit tests/Feature/EvalGateTest.php`:
+These are **local eval-fixture** measurements from `gp:eval` / `EvalGateTest`
+against the scratch hub. They are NOT production-hub measurements and say
+nothing about the still-`PENDING` table above; the one number in plan 5 that
+does need a real hub is `gp:npi-audit`'s (see below).
 
-| Metric | Value |
-|---|---|
-| Precision | 1.0000 |
-| Recall | 1.0000 |
-| F1 | 1.0000 |
-| False merges | 0 |
-| False splits | 0 |
-| True pairs | 9 |
-| Records | 17 |
-| Clusters | 10 |
+| Metric | Plan 1 (`bd80f55`) | Plan 5 (match keys & data quality) |
+|---|---|---|
+| Precision | 1.0000 | **1.0000** |
+| Recall | 1.0000 | **1.0000** |
+| F1 | 1.0000 | **1.0000** |
+| False merges | 0 | **0** |
+| False splits | 0 | **0** |
+| True pairs | 9 | **11** |
+| Records | 17 | **23** |
+| Clusters | 10 | **14** |
 
-`EvalGateTest` now ratchets on these numbers (`false_splits === 0`,
+**Why `true_pairs` moved 9 → 11, and why that is not a relaxation.** Plan 5
+promotes DEA and (state, MMIS) to real match keys, so the fixture gained two
+merge pairs that exercise them — `mmis-a`/`mmis-b` and `dea-a`/`dea-b` — plus
+two foils that must NOT merge (`mmis-other-state`, carrying the same MMIS
+number in a different state, and `dea-other`, same name and a different DEA
+number). The ratchet was raised to 11 in the same commit that added the
+records. Precision stayed at 1.0000 rather than merely clearing its 0.99
+floor, and `false_merges` stayed at 0, which is what the two foils are there to
+prove.
+
+`EvalGateTest` ratchets on these numbers (`false_splits === 0`,
 `recall === 1.0`) in addition to the pre-existing floors, so a regression against
 this baseline fails the build even though it would still clear the floors. **Plan
 2 must re-baseline these two ratchet assertions in the same PR that removes the
-`ssn_hash` tier**, stating the new measured numbers in the PR description.
+`ssn_hash` tier**, stating the new measured numbers in the PR description. Under
+the canonical order (`00-PROGRAMME.md` §2) plan 2 sees `true_pairs` 11, so its
+own stated `recall → 0.8889 (8/9)` becomes **0.9091 (10/11)**.
+
+### Still needs a real hub
+
+| Needed | How | Gates |
+|---|---|---|
+| Active identities whose `npi` fails the Luhn+80840 check digit, and the `gp_source_link` rows bound to them via the `npi` tier | `php artisan gp:npi-audit` (read-only) | Whether NPI validation can be enforced **retroactively**. Plan 5 validates at ingestion only; unbinding an identity a prior load already merged on a now-invalid NPI would split it, and the eval fixture cannot size that either way |
 
 ## Running the evaluation
 

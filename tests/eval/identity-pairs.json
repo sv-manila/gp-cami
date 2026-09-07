@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* records exist to measure what plan 2 (SSN removal) costs — when the tier goes, they become a false split and the recall floor must be re-baselined, not lowered silently. The ssn-* hash is a synthetic sha512 of the literal string gp-cami-eval-fixture-synthetic-ssn-grace-adeyemi, so it is reproducible, deliberately NOT a filler value — filler SSNs are what SsnHashGuard blocks, and merging on one would be a defect, not a true positive. The nodob-a/nodob-b pair (same name, no DOB on either record) is kept apart in `truth` as a deliberate POLICY assertion — never merge on name alone without a DOB, no matter how suggestive the name match looks — not a conclusion drawn from the available evidence, so nobody should later 'correct' the answer key to merge them. smith-other's and chain-a's NPIs were originally 1987654327 / 1112223339, which are NOT Luhn-valid under the 80840-prefixed NPI check digit despite looking like plausible 10-digit NPIs — corrected to 1987654328 / 1112223338 (same 9 leading digits, recomputed check digit) once NPI validation was added in plan 5. See EvalFixtureNpiValidityTest, which pins this.",
+  "notes": "Labeled identity pairs for gp-cami. `truth` lists ground-truth clusters: every ref in a cluster is the same real person. The ssn-* records exist to measure what plan 2 (SSN removal) costs — when the tier goes, they become a false split and the recall floor must be re-baselined, not lowered silently. The ssn-* hash is a synthetic sha512 of the literal string gp-cami-eval-fixture-synthetic-ssn-grace-adeyemi, so it is reproducible, deliberately NOT a filler value — filler SSNs are what SsnHashGuard blocks, and merging on one would be a defect, not a true positive. The nodob-a/nodob-b pair (same name, no DOB on either record) is kept apart in `truth` as a deliberate POLICY assertion — never merge on name alone without a DOB, no matter how suggestive the name match looks — not a conclusion drawn from the available evidence, so nobody should later 'correct' the answer key to merge them. smith-other's and chain-a's NPIs were originally 1987654327 / 1112223339, which are NOT Luhn-valid under the 80840-prefixed NPI check digit despite looking like plausible 10-digit NPIs — corrected to 1987654328 / 1112223338 (same 9 leading digits, recomputed check digit) once NPI validation was added in plan 5. See EvalFixtureNpiValidityTest, which pins this. The mmis-* and dea-* records were added by plan 5 to exercise the two match keys it promotes, and each merge pair is deliberately paired with a foil in the fixture pattern already set by smith-other/garcia-other/kowalski-other: mmis-other-state carries the SAME MMIS number in a different state and must never merge (MMIS numbers are per-state Medicaid identifiers, so the same digits in CA and TX are two different registrations), and dea-other shares the name but carries a different DEA number. Without those two foils the gate would prove the new tiers can merge and prove nothing about whether they over-merge. DEA rows carry no state at all because DEA registration is federal.",
   "records": [
     { "ref": "smith-a", "first_name": "Robert", "last_name": "Smith", "date_of_birth": "1970-04-02", "npi": 1234567893 },
     { "ref": "smith-b", "first_name": "Bob", "last_name": "Smith", "date_of_birth": null, "npi": 1234567893 },
@@ -30,7 +30,21 @@
     { "ref": "ssn-a", "first_name": "Grace", "last_name": "Adeyemi", "date_of_birth": "1979-05-14", "npi": null,
       "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" },
     { "ref": "ssn-b", "first_name": "Gracie", "last_name": "Adeyemi", "date_of_birth": null, "npi": null,
-      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" }
+      "ssn_hash": "88f4db093a2e6baff836b6892e0da35234713aee63dbc17005dfe54bc5118e38af0d1c89b4dd96b9784d3eee3e5e99b933eafa718f48efaad2628e91c432348a" },
+
+    { "ref": "mmis-a", "first_name": "Linda", "last_name": "Park", "date_of_birth": "1985-02-20", "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "CA" }] },
+    { "ref": "mmis-b", "first_name": "Lynda", "last_name": "Park", "date_of_birth": null, "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "CA" }] },
+    { "ref": "mmis-other-state", "first_name": "Linda", "last_name": "Park", "date_of_birth": "1991-08-02", "npi": null,
+      "identifiers": [{ "id_type": "mmis", "id_value": "MMIS-4471", "state": "TX" }] },
+
+    { "ref": "dea-a", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": "1977-09-09", "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH1234563" }] },
+    { "ref": "dea-b", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": null, "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH1234563" }] },
+    { "ref": "dea-other", "first_name": "Omar", "last_name": "Haddad", "date_of_birth": "2001-05-05", "npi": null,
+      "identifiers": [{ "id_type": "dea", "id_value": "AH9998887" }] }
   ],
   "truth": [
     ["smith-a", "smith-b", "smith-c"],
@@ -42,6 +56,10 @@
     ["chain-a", "chain-b", "chain-c"],
     ["nodob-a"],
     ["nodob-b"],
-    ["ssn-a", "ssn-b"]
+    ["ssn-a", "ssn-b"],
+    ["mmis-a", "mmis-b"],
+    ["mmis-other-state"],
+    ["dea-a", "dea-b"],
+    ["dea-other"]
   ]
 }

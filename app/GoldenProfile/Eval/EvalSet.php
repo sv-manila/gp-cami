@@ -87,6 +87,24 @@ class EvalSet
         return [];
     }
 
+    /**
+     * Multi-valued identifiers (DEA, MMIS) for one record. Mirrors licenses(),
+     * including its one wart: an unknown ref and a known ref carrying no
+     * identifiers are indistinguishable, both returning [].
+     *
+     * @return list<array{id_type:string,id_value:string,state:?string}>
+     */
+    public function identifiers(string $ref): array
+    {
+        foreach ($this->records as $r) {
+            if ($r['ref'] === $ref) {
+                return $r['identifiers'] ?? [];
+            }
+        }
+
+        return [];
+    }
+
     /** @return list<list<string>> */
     public function truthClusters(): array
     {
