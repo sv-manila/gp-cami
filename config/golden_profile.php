@@ -33,6 +33,29 @@ return [
     ],
 
     /*
+    | Junk / placeholder value screening — Delivery Checklist §2/§3 and
+    | "Recommendations & Open Risks" P1 ("kill mega-blocks at the source").
+    | A few high-frequency junk values are what make matching blow up at
+    | scale; this generalizes SsnHashGuard's cardinality idea (a value shared
+    | by implausibly many distinct people cannot be one person's identifier)
+    | to any column, config-driven. Wired for 'npi' only in this plan (Task 5)
+    | — 'placeholders' starts empty because, unlike SSN's filler list, nobody
+    | has run gp:npi-audit-style measurement against a real hub yet to know
+    | which specific NPI values are reused as filler here. Populate it the
+    | same way SSN's was populated: from measurement, not a guess. license and
+    | address values are good next columns for the same treatment (see this
+    | plan's Self-review) but are not wired in yet.
+    */
+    'junk' => [
+        'placeholders' => [
+            'npi' => [],
+        ],
+        'max_identities_per_value' => [
+            'npi' => 3,
+        ],
+    ],
+
+    /*
     | Pass B — probabilistic. No single global cutoff in production: thresholds
     | are set per source-pair from labeled data (Phase 3). These are the
     | fallback bands used until a pair is calibrated. Bands per GPP spec:
