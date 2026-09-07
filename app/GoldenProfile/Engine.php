@@ -9,6 +9,7 @@ use App\GoldenProfile\Resolution\DeterministicResolver;
 use App\GoldenProfile\Resolution\Survivorship;
 use App\GoldenProfile\Support\JunkKeyGuard;
 use App\GoldenProfile\Support\SsnHashGuard;
+use App\GoldenProfile\Support\Versioner;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -37,6 +38,8 @@ class Engine
 
     private JunkKeyGuard $junkGuard;
 
+    private Versioner $versioner;
+
     public function __construct()
     {
         $this->systemId = $this->ensureSystem();
@@ -46,6 +49,7 @@ class Engine
         $this->survivorship = new Survivorship;
         $this->ssnGuard = new SsnHashGuard;
         $this->junkGuard = new JunkKeyGuard;
+        $this->versioner = new Versioner;
     }
 
     /** Per affected identity: recompute survivorship winners, then rebuild the profile. */
@@ -226,7 +230,15 @@ class Engine
      */
     public function finalizeAll(?callable $progress = null, int $shard = 0, int $shards = 1): void
     {
+        // current = 1 is not an optimisation here, it is what keeps chunkById
+        // sound. identity_id stopped being unique in gp_identity when versions
+        // arrived, so without the filter the cursor visits an identity once per
+        // version — recomputing survivorship and rebuilding the profile N times
+        // for one person, and reporting an inflated total. uq_identity_current
+        // makes identity_id unique among current rows, so the cursor is valid
+        // again.
         $q = fn () => $this->hub()->table('gp_identity')
+            ->where('current', 1)
             ->when($shards > 1, fn ($qq) => $qq->whereRaw('identity_id % ? = ?', [$shards, $shard]));
 
         $total = (int) $q()->count();
@@ -310,9 +322,18 @@ class Engine
     private function mergeByColumn(string $col, int $shard = 0, int $shards = 1): int
     {
         // $col is from a fixed internal whitelist — safe to interpolate.
+        //
+        // current = 1 sits beside status = 'active' in every query below, and both
+        // are needed. `current` picks the newest VERSION; `status` says whether the
+        // identity is live. A merged-away identity keeps a current row (status
+        // 'merged'), which is exactly what stops dedup's fixed-point loop from
+        // re-finding it — and a superseded version can carry a key its successor
+        // dropped, which without the current filter would make dedup fold two
+        // live identities together on evidence that no longer exists.
         $hub = $this->hub();
         $n = 0;
-        $q = $hub->table('gp_identity')->whereNotNull($col)->where('status', 'active');
+        $q = $hub->table('gp_identity')->whereNotNull($col)
+            ->where('current', 1)->where('status', 'active');
         $q = $this->shardFilter($q, $col, $shard, $shards);
         $dupVals = $q->groupBy($col)->havingRaw('COUNT(*) > 1')->pluck($col);
         foreach ($dupVals as $val) {
@@ -326,11 +347,11 @@ class Engine
                 continue;
             }
             $ids = $hub->table('gp_identity')
-                ->where($col, $val)->where('status', 'active')
+                ->where($col, $val)->where('current', 1)->where('status', 'active')
                 ->orderBy('identity_id')->pluck('identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
-                $n += $this->mergeIdentity($survivor, (int) $loser);
+                $n += $this->mergeIdentity($survivor, (int) $loser, $col);
             }
         }
 
@@ -344,6 +365,8 @@ class Engine
         $n = 0;
         $q = $hub->table('gp_license')
             ->join('gp_identity', 'gp_identity.identity_id', '=', 'gp_license.identity_id')
+            ->where('gp_license.current', 1)
+            ->where('gp_identity.current', 1)
             ->where('gp_identity.status', 'active')
             ->select('license_number', 'certification_state', 'certification_board');
         $q = $this->shardFilter($q, "CONCAT_WS('|',license_number,certification_state,certification_board)", $shard, $shards);
@@ -352,6 +375,8 @@ class Engine
         foreach ($groups as $g) {
             $q = $hub->table('gp_license')
                 ->join('gp_identity', 'gp_identity.identity_id', '=', 'gp_license.identity_id')
+                ->where('gp_license.current', 1)
+                ->where('gp_identity.current', 1)
                 ->where('gp_identity.status', 'active')
                 ->where('license_number', $g->license_number);
             $q = $g->certification_state === null
@@ -361,7 +386,7 @@ class Engine
             $ids = $q->orderBy('gp_identity.identity_id')->distinct()->pluck('gp_identity.identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
-                $n += $this->mergeIdentity($survivor, (int) $loser);
+                $n += $this->mergeIdentity($survivor, (int) $loser, 'license_registry');
             }
         }
 
@@ -375,6 +400,8 @@ class Engine
         $n = 0;
         $q = $hub->table('gp_identity_identifier as gii')
             ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+            ->where('gii.current', 1)
+            ->where('gi.current', 1)
             ->where('gi.status', 'active')
             ->select('gii.id_type', 'gii.id_value', 'gii.state');
         $q = $this->shardFilter($q, "CONCAT_WS('|',gii.id_type,gii.id_value,gii.state)", $shard, $shards);
@@ -389,13 +416,15 @@ class Engine
         foreach ($groups as $g) {
             $sub = $hub->table('gp_identity_identifier as gii')
                 ->join('gp_identity as gi', 'gi.identity_id', '=', 'gii.identity_id')
+                ->where('gii.current', 1)
+                ->where('gi.current', 1)
                 ->where('gi.status', 'active')
                 ->where('gii.id_type', $g->id_type)->where('gii.id_value', $g->id_value);
             $sub = $g->state === null ? $sub->whereNull('gii.state') : $sub->where('gii.state', $g->state);
             $ids = $sub->orderBy('gii.identity_id')->distinct()->pluck('gii.identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
-                $n += $this->mergeIdentity($survivor, (int) $loser);
+                $n += $this->mergeIdentity($survivor, (int) $loser, 'identifier');
             }
         }
 
@@ -413,6 +442,7 @@ class Engine
         // the same defect documented in DeterministicResolver::matchDeterministic()
         // that pinned sync at ~0.03 rows/sec, one probe per duplicate group.
         $q = $hub->table('gp_identity')
+            ->where('current', 1)
             ->where('status', 'active')
             ->whereNotNull('canonical_first')->whereNotNull('canonical_last')->whereNotNull('canonical_dob')
             ->select('canonical_first as f', 'canonical_last as l', 'canonical_dob as d');
@@ -432,6 +462,7 @@ class Engine
         $groups = $q->groupBy('f', 'l', 'd')->havingRaw('COUNT(*) > 1')->get();
         foreach ($groups as $g) {
             $ids = $hub->table('gp_identity')
+                ->where('current', 1)
                 ->where('status', 'active')
                 ->where('canonical_last', $g->l)
                 ->where('canonical_first', $g->f)
@@ -439,7 +470,7 @@ class Engine
                 ->orderBy('identity_id')->pluck('identity_id')->all();
             $survivor = (int) array_shift($ids);
             foreach ($ids as $loser) {
-                $n += $this->mergeIdentity($survivor, (int) $loser);
+                $n += $this->mergeIdentity($survivor, (int) $loser, 'name_dob');
             }
         }
 
@@ -455,35 +486,62 @@ class Engine
      * touch the same survivor/loser serialize instead of corrupting each other;
      * if another shard already merged one of them away, this is a no-op.
      *
+     * @param  string  $matchKey  which deterministic key produced this merge — recorded in the log
      * @return int 1 if a merge happened, 0 otherwise
      */
-    private function mergeIdentity(int $survivor, int $loser): int
+    private function mergeIdentity(int $survivor, int $loser, string $matchKey): int
     {
         if ($survivor === $loser) {
             return 0;
         }
 
-        return $this->hub()->transaction(function () use ($survivor, $loser) {
+        return $this->hub()->transaction(function () use ($survivor, $loser, $matchKey) {
             $hub = $this->hub();
             // Lock both rows in a stable order to avoid deadlocks between shards.
             [$lo, $hi] = $survivor < $loser ? [$survivor, $loser] : [$loser, $survivor];
             $hub->table('gp_identity')->whereIn('identity_id', [$lo, $hi])
+                ->where('current', 1)
                 ->orderBy('identity_id')->lockForUpdate()->get();
 
-            $s = $hub->table('gp_identity')->where('identity_id', $survivor)->first();
-            $l = $hub->table('gp_identity')->where('identity_id', $loser)->first();
-            if (! $s || ! $l) {
+            $s = $this->versioner->current('gp_identity', ['identity_id' => $survivor]);
+            $l = $this->versioner->current('gp_identity', ['identity_id' => $loser]);
+
+            // A merged loser keeps a current row, so "already merged" is now a
+            // status check rather than an absent row.
+            if (! $s || ! $l || $s->status !== 'active' || $l->status !== 'active') {
                 return 0;
             }
-            $this->applyMerge($hub, $s, $l, $survivor, $loser);
+            $this->applyMerge($hub, $s, $l, $survivor, $loser, $matchKey);
 
             return 1;
         });
     }
 
-    /** The row-moving half of a merge (runs inside mergeIdentity's transaction). */
-    private function applyMerge($hub, $s, $l, int $survivor, int $loser): void
+    /**
+     * The row-moving half of a merge (runs inside mergeIdentity's transaction).
+     *
+     * WHAT CHANGED UNDER SCD-2
+     * ------------------------
+     * This method used to end with DELETE FROM gp_identity. Data Flow by CAMI says
+     * older rows "preserve a full audit trail", so destroying the losing golden
+     * record is the opposite of the rule. The loser now gets a final version —
+     * status 'merged', merged_into the survivor, current 1 — because the latest
+     * truth about that identity is that it was merged. It stops matching because
+     * every tier and every merge query filters status = 'active', not because the
+     * row is gone. That is also what keeps dedup()'s fixed-point loop terminating.
+     *
+     * The merge is also logged. gp_resolution_log has had a 'merge' action in its
+     * enum since the first migration and has never been written one; without it,
+     * the version trail records THAT an identity was merged but not why or by what
+     * key, and the child tables (where identity_id is not part of the natural key,
+     * so repointing is a bulk update across all versions) carry no trace at all.
+     */
+    private function applyMerge($hub, $s, $l, int $survivor, int $loser, string $matchKey): void
     {
+        // The survivor inherits the loser's null deterministic keys so later dedup
+        // passes can chain matches. That is a change to golden facts, so it is a
+        // version rather than an in-place update — and Versioner mints nothing when
+        // there is nothing to inherit.
         $upd = [];
         foreach (['ssn_hash', 'npi', 'upin', 'dea_number', 'canonical_dob',
             'canonical_first', 'canonical_last', 'canonical_middle'] as $c) {
@@ -492,46 +550,50 @@ class Engine
             }
         }
         if ($upd) {
-            $hub->table('gp_identity')->where('identity_id', $survivor)->update($upd);
+            $this->versioner->write('gp_identity', ['identity_id' => $survivor], $upd);
         }
 
-        // Repoint children whose unique key does NOT include identity_id.
+        // Repoint children whose natural key does NOT include identity_id. ALL
+        // versions move, deliberately: no unique on these tables can collide on
+        // identity_id, and leaving the history behind would orphan it from the
+        // identity the facts now belong to. The cost is that the identity a
+        // credential belonged to before the merge is recoverable only from
+        // gp_resolution_log — see docs/SCD2.md, which records that trade.
         foreach (['gp_source_link', 'gp_edge', 'gp_identity_credential', 'gp_identity_exclusion',
             'gp_identity_resolution', 'gp_resolution_log', 'gp_board_action'] as $t) {
             $hub->table($t)->where('identity_id', $loser)->update(['identity_id' => $survivor]);
         }
 
-        // Collision-prone (unique key includes identity_id): drop loser rows that
-        // would clash with an existing survivor row, repoint the rest.
-        $this->repointDeduped('gp_license', 'license_id', $survivor, $loser,
-            ['license_number', 'certification_state', 'certification_board']);
-        $this->repointDeduped('gp_address', 'address_id', $survivor, $loser,
-            ['address1', 'city', 'state', 'zip']);
-        $this->repointDeduped('gp_identity_identifier', 'id', $survivor, $loser,
-            ['id_type', 'id_value']);
+        // Collision-prone (identity_id is part of the natural key). The current
+        // version moves and is renumbered under the survivor's key; a version that
+        // would clash with something the survivor already holds is RETIRED rather
+        // than deleted, and superseded versions are left attached to the merged
+        // identity — repointing those would violate the natural-key unique, whose
+        // last column is now version_no. See Versioner::repointForMerge.
+        foreach (['gp_license', 'gp_address', 'gp_identity_identifier'] as $t) {
+            $this->versioner->repointForMerge($t, $survivor, $loser);
+        }
 
         // Rebuilt from scratch by finalize — just remove the loser's copies.
         foreach (['gp_attribute', 'gp_survivorship_audit', 'gp_identity_profile'] as $t) {
             $hub->table($t)->where('identity_id', $loser)->delete();
         }
 
-        $hub->table('gp_identity')->where('identity_id', $loser)->delete();
-    }
+        // The loser's final version: where it went, and that this is the last word.
+        $this->versioner->write('gp_identity', ['identity_id' => $loser], [
+            'status' => 'merged',
+            'merged_into' => $survivor,
+        ]);
 
-    private function repointDeduped(string $table, string $pk, int $survivor, int $loser, array $natKey): void
-    {
-        $hub = $this->hub();
-        foreach ($hub->table($table)->where('identity_id', $loser)->get() as $row) {
-            $exists = $hub->table($table)->where('identity_id', $survivor);
-            foreach ($natKey as $k) {
-                $exists = $row->$k === null ? $exists->whereNull($k) : $exists->where($k, $row->$k);
-            }
-            if ($exists->exists()) {
-                $hub->table($table)->where($pk, $row->$pk)->delete();
-            } else {
-                $hub->table($table)->where($pk, $row->$pk)->update(['identity_id' => $survivor]);
-            }
-        }
+        $hub->table('gp_resolution_log')->insert([
+            'action' => 'merge',
+            'identity_id' => $survivor,
+            'affected_ids' => json_encode(['merged' => [$loser]]),
+            'match_key' => $matchKey,
+            'reason' => "dedup: identities shared $matchKey",
+            'actor' => 'engine',
+            'created_at' => now(),
+        ]);
     }
 
     /** Mode 2 — incremental: only employees changed since the watermark. */
@@ -666,18 +728,39 @@ class Engine
             ];
         }
 
-        foreach (array_chunk($upserts, 500) as $batch) {
-            $this->hub()->table('gp_identity_credential')->upsert(
-                $batch,
-                ['system_id', 'credential_match_id'],
-                ['identity_id', 'registry', 'match_summary_status', 'match_summary_status_code',
-                    'match_is_valid', 'source_current', 'date_resolved', 'link_state'],
+        // upsert() became per-row Versioner::write(). A credential whose status,
+        // validity or CAMI currency flag moved is superseded rather than
+        // overwritten; one that came back identical produces nothing, which matters
+        // because sync re-reads every credential of every changed employee on every
+        // run.
+        //
+        // COST, stated plainly: this is one transaction per credential where it
+        // used to be one upsert per 500. That is acceptable on the incremental
+        // path — sync is already per-row and bounded by the source's WAN latency,
+        // not the hub's — and unacceptable on a bulk load, which is why
+        // SqlBackfill::rollup() keeps its set-based statement and is guarded off
+        // until plan 3b converts it.
+        foreach ($upserts as $row) {
+            $this->versioner->write(
+                'gp_identity_credential',
+                ['system_id' => $row['system_id'], 'credential_match_id' => $row['credential_match_id']],
+                array_intersect_key($row, array_flip([
+                    'registry', 'match_summary_status', 'match_summary_status_code',
+                    'match_is_valid', 'source_current', 'date_resolved', 'link_state',
+                ])),
+                [],
+                ['identity_id' => $row['identity_id']],
             );
         }
-        foreach (array_chunk($deleteIds, 1000) as $batch) {
-            $this->hub()->table('gp_identity_credential')
-                ->where('system_id', $this->systemId)
-                ->whereIn('credential_match_id', $batch)->delete();
+
+        // Pending / Error matches are not part of the golden data. They used to be
+        // DELETEd; retiring them keeps the trail of a credential that was rolled up
+        // and later became ineligible, which is the whole point of the pattern.
+        foreach ($deleteIds as $credentialMatchId) {
+            $this->versioner->retire('gp_identity_credential', [
+                'system_id' => $this->systemId,
+                'credential_match_id' => $credentialMatchId,
+            ]);
         }
     }
 
@@ -724,12 +807,17 @@ class Engine
             ];
         }
 
-        foreach (array_chunk($upserts, 500) as $batch) {
-            $this->hub()->table('gp_identity_exclusion')->upsert(
-                $batch,
-                ['system_id', 'match_id'],
-                ['identity_id', 'exclusion_record_id', 'registry', 'is_ssn_match', 'is_npi_match',
-                    'is_canonical_name_match', 'is_upin_match', 'is_license_number_match', 'link_state'],
+        // Same conversion, same reasoning, as rollupCredentials above.
+        foreach ($upserts as $row) {
+            $this->versioner->write(
+                'gp_identity_exclusion',
+                ['system_id' => $row['system_id'], 'match_id' => $row['match_id']],
+                array_intersect_key($row, array_flip([
+                    'exclusion_record_id', 'registry', 'is_ssn_match', 'is_npi_match',
+                    'is_canonical_name_match', 'is_upin_match', 'is_license_number_match', 'link_state',
+                ])),
+                [],
+                ['identity_id' => $row['identity_id']],
             );
         }
     }
@@ -747,7 +835,7 @@ class Engine
     {
         $ids = $identityId
             ? [$identityId]
-            : $this->hub()->table('gp_identity')->pluck('identity_id')->all();
+            : $this->hub()->table('gp_identity')->where('current', 1)->pluck('identity_id')->all();
         foreach ($ids as $id) {
             $this->materializer->rebuild((int) $id);
         }

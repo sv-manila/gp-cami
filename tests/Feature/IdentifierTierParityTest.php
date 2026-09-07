@@ -20,6 +20,13 @@ use Tests\Support\HubTestCase;
  * The bulk tests stage under SqlBackfill's own system — see
  * JunkNpiParityTest's docblock for why the harness's system_id does not work
  * with tierCreate()/tierLink().
+ *
+ * Every "how many live identities" assertion filters current = 1 as well as
+ * status = 'active'. Since plan 3a versioned gp_identity, a merged loser is
+ * RETIRED rather than deleted — it keeps a current row saying
+ * status = 'merged', but its superseded version 1 still says 'active', so a
+ * status-only count sees the merged identity again and reads 2 where the hub
+ * holds 1 live person.
  */
 class IdentifierTierParityTest extends HubTestCase
 {
@@ -96,14 +103,14 @@ class IdentifierTierParityTest extends HubTestCase
         // identity) -> enrich (populates gp_identity_identifier) -> dedup.
         $backfill = new SqlBackfill;
         $backfill->resolveDeterministic();
-        $this->assertSame(2, $this->hub()->table('gp_identity')->where('status', 'active')->count(),
+        $this->assertSame(2, $this->hub()->table('gp_identity')->where('current', 1)->where('status', 'active')->count(),
             'sanity: without the identifier tier the bulk resolve step alone must NOT merge these');
 
         $backfill->enrich();
         $merged = (new Engine)->dedup();
 
         $this->assertGreaterThan(0, $merged);
-        $this->assertSame(1, $this->hub()->table('gp_identity')->where('status', 'active')->count());
+        $this->assertSame(1, $this->hub()->table('gp_identity')->where('current', 1)->where('status', 'active')->count());
     }
 
     public function test_bulk_path_does_not_converge_across_different_states(): void
@@ -119,7 +126,7 @@ class IdentifierTierParityTest extends HubTestCase
         $backfill->enrich();
         (new Engine)->dedup();
 
-        $this->assertSame(2, $this->hub()->table('gp_identity')->where('status', 'active')->count(),
+        $this->assertSame(2, $this->hub()->table('gp_identity')->where('current', 1)->where('status', 'active')->count(),
             'different states sharing an mmis number must not converge even after dedup');
     }
 }
