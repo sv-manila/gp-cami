@@ -23,10 +23,27 @@ class SourceCurrentRenameTest extends HubTestCase
             $schema->hasColumn('gp_identity_credential', 'source_current'),
             'the mirrored CAMI credential_matches.current must be renamed source_current'
         );
-        $this->assertFalse(
-            $schema->hasColumn('gp_identity_credential', 'current'),
-            'the name `current` must be free for the SCD-2 version flag'
-        );
+        // `current` is NOT asserted absent. It was free the moment the rename
+        // landed, and the very next migration takes it for the SCD-2 version
+        // flag — so an assertFalse here would have been true for exactly one
+        // commit and then failed forever. (The plan wrote it that way; it fails
+        // as soon as 2026_09_04_000100 runs.)
+        //
+        // What must stay true is that the two meanings never share a column, so
+        // the durable assertion is about SHAPE: if `current` exists it is the
+        // version flag — NOT NULL DEFAULT 1 — never the nullable CAMI mirror.
+        if ($schema->hasColumn('gp_identity_credential', 'current')) {
+            $definition = $this->hub()->selectOne(
+                'SELECT is_nullable AS n, column_default AS d FROM information_schema.columns
+                 WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?',
+                ['gp_identity_credential', 'current']
+            );
+
+            $this->assertSame('NO', $definition->n,
+                '`current` must be the SCD-2 version flag (NOT NULL), not the nullable CAMI mirror');
+            $this->assertSame('1', (string) $definition->d,
+                '`current` must be the SCD-2 version flag (DEFAULT 1), not the nullable CAMI mirror');
+        }
     }
 
     public function test_the_profile_json_still_publishes_the_field_as_current(): void

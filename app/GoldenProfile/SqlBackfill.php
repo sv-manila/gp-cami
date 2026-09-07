@@ -665,11 +665,21 @@ class SqlBackfill
 
     /** gp_identity key indexes, dropped during the residual bulk insert and rebuilt after. */
     private const IDENTITY_KEY_INDEXES = [
-        'idx_ssn' => 'ssn_hash',
-        'idx_npi' => 'npi',
-        'idx_upin' => 'upin',
-        'idx_dea' => 'dea_number',
-        'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob',
+        // Every definition ends in `current`, and must. The SCD-2 migration
+        // (2026_09_04_000100) creates these five with a trailing `current` so
+        // the tier probes stay sargable once every read filters on it — and
+        // this bulk path DROPS them before its load and re-ADDs them from this
+        // constant afterwards. A definition that omits `current` here silently
+        // reverts the migration: no error, the index simply comes back narrower
+        // and every probe starts reading the whole version history. Measured
+        // exactly that way — Scd2SchemaTest's index assertion passed in
+        // isolation and failed in the full suite, because a Feature test had
+        // run this path in between.
+        'idx_ssn' => 'ssn_hash, `current`',
+        'idx_npi' => 'npi, `current`',
+        'idx_upin' => 'upin, `current`',
+        'idx_dea' => 'dea_number, `current`',
+        'idx_name_dob' => 'canonical_last, canonical_first, canonical_dob, `current`',
     ];
 
     private function dropIdentityKeyIndexes(): void
