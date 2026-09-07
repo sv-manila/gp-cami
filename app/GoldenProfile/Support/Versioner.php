@@ -336,7 +336,7 @@ class Versioner
                 continue;                       // absent = carry forward = no change
             }
 
-            if (! $this->same($row->$column ?? null, $incoming[$column])) {
+            if (! self::same($row->$column ?? null, $incoming[$column])) {
                 return true;
             }
         }
@@ -355,8 +355,14 @@ class Versioner
      * exists to prevent. Nulls are compared strictly, since NULL and '' are
      * genuinely different here (they are what makes the natural-key uniques
      * NULL-permissive).
+     *
+     * PUBLIC AND STATIC so its SQL twin can be pinned against it.
+     * Support\VersionerSql::same() renders this same rule as an SQL expression for
+     * the set-based paths, and VersionerSqlTest asserts the two agree pair by pair.
+     * A rule with two implementations that cannot be compared is the exact failure
+     * this class was created to prevent — see the tiebreak note at the top.
      */
-    private function same($stored, $incoming): bool
+    public static function same($stored, $incoming): bool
     {
         if ($stored === null || $incoming === null) {
             return $stored === null && $incoming === null;
@@ -387,7 +393,13 @@ class Versioner
 
         $row = (array) $latest;
 
-        unset($row['current'], $row['version_no'], $row['current_key']);
+        // stg_seed_id is SqlBackfill::residualCreateAndLink()'s scratch carrier
+        // (2026_09_04_000200_add_stg_seed_id_to_gp_identity), cleared in the same
+        // step that sets it. Unsetting it here means a run that died between the
+        // two cannot preserve a stale stg_person_id through every future version.
+        // unset() on an absent key is a no-op, so this is safe before Task 5's
+        // migration adds the column.
+        unset($row['current'], $row['version_no'], $row['current_key'], $row['stg_seed_id']);
 
         if ($spec['surrogate'] !== null) {
             unset($row[$spec['surrogate']]);
